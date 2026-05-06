@@ -16,6 +16,7 @@ that input intact so the rover can be pointed at this Pi instead of Blynk.
 - Web dashboard on `0.0.0.0:8080`
 - Optional UDP peer listener on `0.0.0.0:5005`
 - Server-sent events for live browser updates
+- Per-rover settings UI with queued dashboard-to-rover requests
 
 No Node, npm, pip, Mosquitto, or external Python packages are required.
 
@@ -152,6 +153,16 @@ Restart the rover after changing the config.
 
 The rover can keep publishing to `batch_ds`; the dashboard accepts that Blynk
 style payload directly.
+
+## Dashboard Settings UI
+
+The gear button in the top-right header opens a per-rover settings screen. Rover
+selection still uses the rover buttons in the header.
+
+Current rover code does not apply dashboard settings yet, so the UI stays in a
+safe pending state until a rover advertises settings support. The dashboard
+already provides the queue, pending, ack, and log endpoints for that future rover
+integration. See [howto.md](howto.md) for the rover-side implementation guide.
 
 ## Run
 

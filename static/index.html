@@ -19,13 +19,16 @@
           </div>
         </div>
         <div class="header-rover-list" id="header-rover-list"></div>
-        <div class="status-strip">
-          <div class="status-dot" id="live-dot"></div>
-          <span id="live-label">Waiting</span>
+        <div class="header-actions">
+          <button type="button" class="settings-toggle" id="settings-toggle" title="Settings" aria-label="Settings" aria-pressed="false">&#9881;</button>
+          <div class="status-strip">
+            <div class="status-dot" id="live-dot"></div>
+            <span id="live-label">Waiting</span>
+          </div>
         </div>
       </header>
 
-      <main class="dashboard-grid">
+      <main class="dashboard-grid" id="dashboard-view">
         <section class="map-panel">
           <div id="map"></div>
           <div class="map-overlay">
@@ -83,6 +86,33 @@
               </div>
             </details>
           </section>
+        </aside>
+      </main>
+
+      <main class="settings-view" id="settings-view" hidden>
+        <section class="settings-editor">
+          <div class="settings-toolbar">
+            <div>
+              <div class="panel-title">Rover Settings</div>
+              <h2 id="settings-rover-name">No rover selected</h2>
+              <div class="settings-meta" id="settings-rover-meta">Waiting for rover telemetry</div>
+            </div>
+            <div class="settings-status" id="settings-api-status">Pending Rover API</div>
+          </div>
+
+          <div class="settings-body">
+            <form class="settings-form" id="settings-form"></form>
+            <div class="settings-actions">
+              <button type="button" class="secondary-action" id="settings-reset">Reset Draft</button>
+              <button type="button" class="primary-action" id="settings-apply">Apply to Rover</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="settings-log-panel">
+          <div class="panel-title">Serial Log</div>
+          <div class="settings-log-rover" id="settings-log-rover">No rover selected</div>
+          <div class="settings-log-stream" id="settings-log-stream"></div>
         </aside>
       </main>
     </div>

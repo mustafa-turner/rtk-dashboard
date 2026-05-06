@@ -21,3 +21,8 @@ dashboard:
     latitude: -2.5489
     longitude: 118.0149
     zoom: 5
+
+settings:
+  # Optional shared secret for rover polling, ack, and serial-log posts.
+  # Leave blank while testing on a trusted local network.
+  writeToken: ""

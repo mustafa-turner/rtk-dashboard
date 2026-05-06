@@ -1,6 +1,8 @@
 const state = {
   data: null,
   selectedId: null,
+  view: "dashboard",
+  settingsDrafts: {},
   map: null,
   deviceMarkers: new Map(),
   peerMarkers: new Map(),
@@ -18,6 +20,67 @@ const ntripLabels = {
   0: "DISCONNECTED",
   1: "CONNECTED",
 };
+
+const roverSettingsSchema = [
+  {
+    title: "Identity",
+    note: "Matches the rover serial menu identity fields.",
+    fields: [
+      { path: "dashboard.roverName", label: "Device Name", type: "text", placeholder: "rover-alpha" },
+      { path: "blynk.publishIntervalSec", label: "Publish Interval", type: "number", min: 0.25, step: 0.25, unit: "s" },
+    ],
+  },
+  {
+    title: "GNSS",
+    note: "Receiver connection values from the USB serial setup menu.",
+    fields: [
+      { path: "gnss.port", label: "GNSS Serial Port", type: "text", placeholder: "/dev/ttyACM0" },
+      { path: "gnss.baud", label: "GNSS Baud Rate", type: "number", min: 1200, step: 1 },
+      { path: "gnss.dynamicModel", label: "Dynamic Model", type: "select", options: ["portable", "stationary", "pedestrian", "automotive", "airborne1g"] },
+      { path: "gnss.measurementRateHz", label: "Measurement Rate", type: "number", min: 1, step: 1, unit: "Hz" },
+    ],
+  },
+  {
+    title: "NTRIP",
+    note: "Caster and mountpoint values used for RTK corrections.",
+    fields: [
+      { path: "ntrip.enabled", label: "NTRIP Enabled", type: "checkbox" },
+      { path: "ntrip.host", label: "NTRIP Caster Host", type: "text", placeholder: "caster.example.com" },
+      { path: "ntrip.port", label: "NTRIP Caster Port", type: "number", min: 1, max: 65535, step: 1 },
+      { path: "ntrip.mountpoint", label: "NTRIP Mountpoint", type: "text", placeholder: "MOUNT" },
+      { path: "ntrip.username", label: "NTRIP Username", type: "text" },
+      { path: "ntrip.password", label: "NTRIP Password", type: "password", secret: true },
+      { path: "ntrip.useTls", label: "NTRIP TLS", type: "checkbox" },
+    ],
+  },
+  {
+    title: "Dashboard MQTT",
+    note: "Blynk-compatible MQTT values used by this dashboard.",
+    fields: [
+      { path: "blynk.enabled", label: "MQTT Enabled", type: "checkbox" },
+      { path: "blynk.broker", label: "MQTT Broker", type: "text", placeholder: "192.168.1.50" },
+      { path: "blynk.port", label: "MQTT Port", type: "number", min: 1, max: 65535, step: 1 },
+      { path: "blynk.username", label: "MQTT Username", type: "text" },
+      { path: "blynk.authToken", label: "MQTT Auth Token", type: "password", secret: true },
+      { path: "blynk.templateId", label: "MQTT Template ID", type: "text" },
+      { path: "blynk.firmwareVersion", label: "MQTT Firmware Version", type: "text" },
+      { path: "blynk.useTls", label: "MQTT TLS", type: "checkbox" },
+    ],
+  },
+  {
+    title: "Peer Safety",
+    note: "Peer broadcast and safe-distance values from the rover menu.",
+    fields: [
+      { path: "peer.enabled", label: "Peer UDP Enabled", type: "checkbox" },
+      { path: "peer.host", label: "Peer UDP Host", type: "text", placeholder: "255.255.255.255" },
+      { path: "peer.port", label: "Peer UDP Port", type: "number", min: 1, max: 65535, step: 1 },
+      { path: "safety.safeDistanceM", label: "Safe Distance Limit", type: "number", min: 0, step: 0.1, unit: "m" },
+      { path: "safety.warningDistanceM", label: "Warning Distance Limit", type: "number", min: 0, step: 0.1, unit: "m" },
+    ],
+  },
+];
+
+const fallbackSettingsFields = roverSettingsSchema.flatMap((section) => section.fields);
 
 function byId(id) {
   return document.getElementById(id);
@@ -218,6 +281,370 @@ function getLatLng(telemetry) {
     }
   }
   return null;
+}
+
+function readPath(source, path) {
+  if (!source || !path) return undefined;
+  return path.split(".").reduce((cursor, key) => {
+    if (cursor === null || cursor === undefined || typeof cursor !== "object") return undefined;
+    return cursor[key];
+  }, source);
+}
+
+function settingsSchemaForDevice(device) {
+  const schema = device?.telemetry?.settings_schema || device?.info?.settings_schema;
+  if (!Array.isArray(schema)) return roverSettingsSchema;
+
+  const cleaned = schema
+    .filter((section) => section && typeof section === "object" && Array.isArray(section.fields))
+    .map((section) => ({
+      title: String(section.title || "Settings"),
+      fields: section.fields
+        .filter((field) => field && typeof field === "object" && field.path)
+        .map((field) => ({
+          path: String(field.path),
+          label: String(field.label || field.path),
+          type: ["text", "number", "password", "checkbox", "select"].includes(field.type) ? field.type : "text",
+          options: Array.isArray(field.options) ? field.options.map(String) : undefined,
+          placeholder: field.placeholder === undefined ? undefined : String(field.placeholder),
+          min: field.min,
+          max: field.max,
+          step: field.step,
+          unit: field.unit === undefined ? undefined : String(field.unit),
+          secret: Boolean(field.secret),
+        })),
+    }))
+    .filter((section) => section.fields.length);
+
+  return cleaned.length ? cleaned : roverSettingsSchema;
+}
+
+function settingsFieldsForDevice(device) {
+  const fields = settingsSchemaForDevice(device).flatMap((section) => section.fields);
+  return fields.length ? fields : fallbackSettingsFields;
+}
+
+function settingCurrentValue(device, field) {
+  const sources = [
+    device?.telemetry?.settings,
+    device?.telemetry?.config,
+    device?.info?.settings,
+    device?.info?.config,
+    device?.telemetry,
+    device?.info,
+  ];
+
+  for (const source of sources) {
+    const value = readPath(source, field.path);
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+
+  if (field.path === "dashboard.roverName" && device) return displayNameForDevice(device);
+  return undefined;
+}
+
+function settingDraftForDevice(deviceId) {
+  if (!deviceId) return {};
+  if (!state.settingsDrafts[deviceId]) state.settingsDrafts[deviceId] = {};
+  return state.settingsDrafts[deviceId];
+}
+
+function settingInputValue(device, field) {
+  const draft = settingDraftForDevice(device?.device_id || "");
+  if (Object.prototype.hasOwnProperty.call(draft, field.path)) return draft[field.path];
+  return settingCurrentValue(device, field);
+}
+
+function normalizeSettingValue(value, field) {
+  if (field.type === "checkbox") return Boolean(value);
+  if (field.type === "number") {
+    if (value === "" || value === null || value === undefined) return "";
+    const number = Number(value);
+    return Number.isFinite(number) ? number : value;
+  }
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function settingsValueChanged(currentValue, draftValue, field) {
+  if (field.type === "password" && draftValue === "") return false;
+  return normalizeSettingValue(currentValue, field) !== normalizeSettingValue(draftValue, field);
+}
+
+function formattedSettingValue(value, field) {
+  if (field.secret) {
+    return value === undefined || value === null || value === "" ? "-" : "saved";
+  }
+  if (field.type === "checkbox") {
+    if (value === undefined || value === null || value === "") return "-";
+    return value ? "on" : "off";
+  }
+  return valueOrDash(value, field.unit ? ` ${field.unit}` : "");
+}
+
+function roverSupportsSettings(device) {
+  const status = device?.telemetry?.settings_status || device?.info?.settings_status || {};
+  return Boolean(
+    status.supported ||
+      device?.telemetry?.dashboard_settings_supported ||
+      device?.telemetry?.settings_api_supported ||
+      device?.info?.dashboard_settings_supported ||
+      device?.info?.settings_api_supported
+  );
+}
+
+function settingsSupportLabel(device) {
+  if (!device) return "No Rover";
+  return roverSupportsSettings(device) ? "Ready" : "Pending Rover API";
+}
+
+function selectedSettingsChanges(device) {
+  if (!device) return [];
+  const draft = settingDraftForDevice(device.device_id);
+  return settingsFieldsForDevice(device)
+    .filter((field) => Object.prototype.hasOwnProperty.call(draft, field.path))
+    .filter((field) => settingsValueChanged(settingCurrentValue(device, field), draft[field.path], field))
+    .map((field) => ({
+      path: field.path,
+      label: field.label,
+      type: field.type,
+      secret: Boolean(field.secret),
+      value: normalizeSettingValue(draft[field.path], field),
+    }));
+}
+
+function fieldInputHtml(device, field) {
+  const currentValue = settingCurrentValue(device, field);
+  const draftValue = settingInputValue(device, field);
+  const changed = settingsValueChanged(currentValue, draftValue, field);
+  const changedClass = changed ? " changed" : "";
+  const common = `data-setting-path="${escapeHtml(field.path)}"`;
+
+  if (field.type === "checkbox") {
+    return `<input class="${changedClass.trim()}" type="checkbox" ${common} ${draftValue ? "checked" : ""}>`;
+  }
+
+  if (field.type === "select") {
+    const value = draftValue === undefined || draftValue === null ? "" : String(draftValue);
+    const options = [`<option value="">-</option>`]
+      .concat(
+        (field.options || []).map((option) => {
+          const selected = value === String(option) ? " selected" : "";
+          return `<option value="${escapeHtml(option)}"${selected}>${escapeHtml(option)}</option>`;
+        })
+      )
+      .join("");
+    return `<select class="${changedClass.trim()}" ${common}>${options}</select>`;
+  }
+
+  const inputType = field.type === "password" ? "password" : field.type === "number" ? "number" : "text";
+  const value = field.type === "password" && !changed ? "" : draftValue ?? "";
+  const attrs = [
+    `class="${changedClass.trim()}"`,
+    `type="${inputType}"`,
+    common,
+    `value="${escapeHtml(value)}"`,
+    field.placeholder ? `placeholder="${escapeHtml(field.placeholder)}"` : "",
+    field.min !== undefined ? `min="${escapeHtml(field.min)}"` : "",
+    field.max !== undefined ? `max="${escapeHtml(field.max)}"` : "",
+    field.step !== undefined ? `step="${escapeHtml(field.step)}"` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return `<input ${attrs}>`;
+}
+
+function renderSettingsForm(device) {
+  const form = byId("settings-form");
+  if (!device) {
+    form.innerHTML = `<div class="empty">Waiting for rover telemetry</div>`;
+    return;
+  }
+
+  form.innerHTML = settingsSchemaForDevice(device)
+    .map((section) => {
+      const fields = section.fields
+        .map((field) => {
+          const currentValue = settingCurrentValue(device, field);
+          return `
+            <label class="settings-field">
+              <span class="settings-field-label">
+                <strong>${escapeHtml(field.label)}</strong>
+                <span>${escapeHtml(field.path)}</span>
+              </span>
+              <span class="settings-input-wrap">
+                ${fieldInputHtml(device, field)}
+                <span class="settings-current">Current: ${escapeHtml(formattedSettingValue(currentValue, field))}</span>
+              </span>
+            </label>
+          `;
+        })
+        .join("");
+      return `
+        <section class="settings-section">
+          <div class="settings-section-head">
+            <strong>${escapeHtml(section.title)}</strong>
+          </div>
+          <div class="settings-fields">${fields}</div>
+        </section>
+      `;
+    })
+    .join("");
+}
+
+function formatLogTime(atMs) {
+  if (!atMs) return "--:--:--";
+  return new Date(atMs).toLocaleTimeString([], { hour12: false });
+}
+
+function settingsLogsForDevice(snapshot, device) {
+  if (!device) return [];
+  const deviceLogs = snapshot.settings?.logs?.[device.device_id] || [];
+  const pending = snapshot.settings?.pending?.[device.device_id] || [];
+  const logs = deviceLogs.slice(-60);
+
+  if (!logs.length) {
+    logs.push({
+      at_ms: snapshot.server.now_ms,
+      level: "info",
+      message: roverSupportsSettings(device) ? "Rover settings API ready" : "Rover settings API not advertised",
+    });
+  }
+
+  if (pending.length) {
+    logs.push({
+      at_ms: snapshot.server.now_ms,
+      level: "info",
+      message: `${pending.length} settings request${pending.length === 1 ? "" : "s"} pending`,
+    });
+  }
+
+  if (device.last_seen_ms) {
+    logs.push({
+      at_ms: device.last_seen_ms,
+      level: "telemetry",
+      message: `Telemetry received ${ageLabel(device.last_seen_ms, snapshot.server.now_ms)} ago`,
+    });
+  }
+
+  return logs.slice(-80);
+}
+
+function renderSettingsLogs(snapshot, device) {
+  byId("settings-log-rover").textContent = device ? displayNameForDevice(device) : "No rover selected";
+  const stream = byId("settings-log-stream");
+  const logs = settingsLogsForDevice(snapshot, device);
+  if (!logs.length) {
+    stream.innerHTML = `<div class="settings-log-empty">Waiting for serial output</div>`;
+    return;
+  }
+
+  stream.innerHTML = logs
+    .map(
+      (entry) => `
+        <div class="settings-log-line">
+          <span class="settings-log-time">${escapeHtml(formatLogTime(entry.at_ms))}</span>
+          <span class="settings-log-level">${escapeHtml(entry.level || "info")}</span>
+          <span class="settings-log-message">${escapeHtml(entry.message || "")}</span>
+        </div>
+      `
+    )
+    .join("");
+  stream.scrollTop = stream.scrollHeight;
+}
+
+function renderSettings(snapshot) {
+  const device = selectedDevice();
+  const support = settingsSupportLabel(device);
+  const status = byId("settings-api-status");
+  const changes = selectedSettingsChanges(device);
+
+  byId("settings-rover-name").textContent = device ? displayNameForDevice(device) : "No rover selected";
+  byId("settings-rover-meta").textContent = device
+    ? `${device.device_id} - ${device.source_host || "unknown host"} - ${ageLabel(device.last_seen_ms, snapshot.server.now_ms)} ago`
+    : "Waiting for rover telemetry";
+  status.textContent = support;
+  status.className = `settings-status${roverSupportsSettings(device) ? " ready" : ""}`;
+
+  renderSettingsForm(device);
+  renderSettingsLogs(snapshot, device);
+
+  const apply = byId("settings-apply");
+  apply.disabled = !device || !roverSupportsSettings(device) || !changes.length;
+  if (!device) {
+    apply.textContent = "No Rover Selected";
+  } else if (!roverSupportsSettings(device)) {
+    apply.textContent = "Awaiting Rover API";
+  } else if (!changes.length) {
+    apply.textContent = "No Changes";
+  } else {
+    apply.textContent = `Apply ${changes.length} Change${changes.length === 1 ? "" : "s"}`;
+  }
+}
+
+function setActiveView(view) {
+  state.view = view;
+  byId("dashboard-view").hidden = view !== "dashboard";
+  byId("settings-view").hidden = view !== "settings";
+  const toggle = byId("settings-toggle");
+  toggle.classList.toggle("active", view === "settings");
+  toggle.setAttribute("aria-pressed", String(view === "settings"));
+  if (state.data) render(state.data);
+  if (view === "dashboard" && state.map) {
+    setTimeout(() => state.map.invalidateSize(), 0);
+  }
+}
+
+function updateSettingsDraftFromInput(input) {
+  const device = selectedDevice();
+  if (!device) return;
+  const field = settingsFieldsForDevice(device).find((candidate) => candidate.path === input.dataset.settingPath);
+  if (!field) return;
+  const draft = settingDraftForDevice(device.device_id);
+  draft[field.path] = field.type === "checkbox" ? input.checked : input.value;
+  renderSettings(state.data);
+}
+
+async function applySelectedSettings() {
+  const device = selectedDevice();
+  const changes = selectedSettingsChanges(device);
+  if (!device || !changes.length || !roverSupportsSettings(device)) return;
+
+  const response = await fetch(`/api/rovers/${encodeURIComponent(device.device_id)}/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ changes }),
+  });
+  if (!response.ok) {
+    throw new Error(`settings request failed: ${response.status}`);
+  }
+  delete state.settingsDrafts[device.device_id];
+  if (state.data) render(state.data);
+}
+
+function setupSettingsUi() {
+  byId("settings-toggle").addEventListener("click", () => {
+    setActiveView(state.view === "settings" ? "dashboard" : "settings");
+  });
+
+  byId("settings-form").addEventListener("change", (event) => {
+    const target = event.target;
+    if (target?.dataset?.settingPath) updateSettingsDraftFromInput(target);
+  });
+
+  byId("settings-reset").addEventListener("click", () => {
+    const device = selectedDevice();
+    if (!device) return;
+    delete state.settingsDrafts[device.device_id];
+    renderSettings(state.data);
+  });
+
+  byId("settings-apply").addEventListener("click", () => {
+    applySelectedSettings().catch((error) => {
+      console.error(error);
+      byId("live-label").textContent = "Settings Error";
+      byId("live-dot").className = "status-dot offline";
+    });
+  });
 }
 
 function initMap(config) {
@@ -548,7 +975,7 @@ function selectHeaderRover(deviceId) {
   render(snapshot);
 
   const latLng = getLatLng(device.telemetry || {});
-  if (latLng && state.map) state.map.setView(latLng, Math.max(state.map.getZoom(), 16));
+  if (state.view === "dashboard" && latLng && state.map) state.map.setView(latLng, Math.max(state.map.getZoom(), 16));
 }
 
 function ensureHeaderRoverButton(list, deviceId) {
@@ -742,6 +1169,7 @@ function render(snapshot) {
   updateMarkers(snapshot);
   updateSelectedLabel(selected);
   renderRawPayloads(payloadRovers);
+  if (state.view === "settings") renderSettings(snapshot);
 }
 
 function escapeHtml(value) {
@@ -754,6 +1182,7 @@ function escapeHtml(value) {
 }
 
 async function boot() {
+  setupSettingsUi();
   const response = await fetch("/api/state");
   const snapshot = await response.json();
   initMap(snapshot.server);

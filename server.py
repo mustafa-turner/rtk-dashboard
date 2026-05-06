@@ -123,6 +123,7 @@ def load_config(path: Path) -> dict[str, Any]:
             "title": "Crane Rover Dashboard",
             "defaultCenter": {"latitude": -2.5489, "longitude": 118.0149, "zoom": 5},
         },
+        "settings": {"writeToken": ""},
     }
 
     if not path.exists():
@@ -202,6 +203,63 @@ def decode_json_or_value(raw_payload: bytes) -> Any:
         return coerce_value(text)
 
 
+def is_safe_settings_path(value: str) -> bool:
+    if not (1 <= len(value) <= 96):
+        return False
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+    return all(char in allowed for char in value)
+
+
+def is_secret_setting(path: str, label: str = "") -> bool:
+    haystack = f"{path} {label}".lower()
+    return any(word in haystack for word in ("password", "token", "secret", "key"))
+
+
+def mask_setting_value(change: dict[str, Any]) -> dict[str, Any]:
+    masked = dict(change)
+    if bool(masked.get("secret")) or is_secret_setting(str(masked.get("path", "")), str(masked.get("label", ""))):
+        masked["value"] = "saved" if masked.get("value") not in {None, ""} else ""
+    return masked
+
+
+def validate_settings_changes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    changes = payload.get("changes")
+    if not isinstance(changes, list) or not changes:
+        raise ValueError("changes must be a non-empty list")
+    if len(changes) > 40:
+        raise ValueError("too many settings changes")
+
+    cleaned: list[dict[str, Any]] = []
+    for raw_change in changes:
+        if not isinstance(raw_change, dict):
+            raise ValueError("each settings change must be an object")
+
+        path = str(raw_change.get("path") or "").strip()
+        if not is_safe_settings_path(path):
+            raise ValueError(f"unsafe settings path: {path!r}")
+
+        value = raw_change.get("value")
+        if isinstance(value, (dict, list)):
+            raise ValueError(f"nested values are not allowed for {path}")
+        if not isinstance(value, (str, int, float, bool, type(None))):
+            raise ValueError(f"unsupported value type for {path}")
+        if isinstance(value, str) and len(value) > 2048:
+            raise ValueError(f"value too long for {path}")
+
+        label = str(raw_change.get("label") or path).strip()[:80]
+        setting_type = str(raw_change.get("type") or "text").strip()[:20]
+        cleaned.append(
+            {
+                "path": path,
+                "label": label,
+                "type": setting_type,
+                "secret": bool(raw_change.get("secret")) or is_secret_setting(path, label),
+                "value": value,
+            }
+        )
+    return cleaned
+
+
 @dataclass
 class DeviceRecord:
     device_id: str
@@ -235,6 +293,9 @@ class DashboardState:
         self._devices: dict[str, DeviceRecord] = {}
         self._peers: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
+        self._settings_sequence = 0
+        self._settings_requests: dict[str, list[dict[str, Any]]] = {}
+        self._settings_logs: dict[str, list[dict[str, Any]]] = {}
         self.started_ms = now_ms()
 
     def configured_rover_name(self, *keys: str) -> str:
@@ -264,6 +325,133 @@ class DashboardState:
             self._events = self._events[-80:]
             self._version += 1
             self._condition.notify_all()
+
+    def append_settings_log(
+        self,
+        device_id: str,
+        message: str,
+        level: str = "info",
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        entry = {
+            "level": str(level or "info")[:20],
+            "message": str(message or "")[:1000],
+            "data": data or {},
+            "at_ms": now_ms(),
+        }
+        with self._condition:
+            logs = self._settings_logs.setdefault(str(device_id), [])
+            logs.append(entry)
+            self._settings_logs[str(device_id)] = logs[-120:]
+            self._version += 1
+            self._condition.notify_all()
+        return entry
+
+    def queue_settings_request(self, device_id: str, changes: list[dict[str, Any]]) -> dict[str, Any]:
+        with self._condition:
+            self._settings_sequence += 1
+            request = {
+                "id": self._settings_sequence,
+                "device_id": str(device_id),
+                "changes": changes,
+                "status": "pending",
+                "created_ms": now_ms(),
+                "updated_ms": now_ms(),
+            }
+            requests = self._settings_requests.setdefault(str(device_id), [])
+            requests.append(request)
+            self._settings_requests[str(device_id)] = requests[-50:]
+            labels = ", ".join(str(change.get("label") or change.get("path")) for change in changes)
+            self._settings_logs.setdefault(str(device_id), []).append(
+                {
+                    "level": "queued",
+                    "message": f"Queued settings request #{request['id']}: {labels}",
+                    "data": {"request_id": request["id"], "change_count": len(changes)},
+                    "at_ms": request["created_ms"],
+                }
+            )
+            self._settings_logs[str(device_id)] = self._settings_logs[str(device_id)][-120:]
+            self._version += 1
+            self._condition.notify_all()
+            return self._settings_request_public(request, include_values=False)
+
+    def pending_settings_requests(self, device_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                self._settings_request_public(request, include_values=True)
+                for request in self._settings_requests.get(str(device_id), [])
+                if request.get("status") == "pending"
+            ]
+
+    def ack_settings_request(
+        self,
+        device_id: str,
+        request_id: int,
+        status: str,
+        message: str = "",
+        applied: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_status = str(status or "applied").strip().lower()
+        if normalized_status not in {"applied", "rejected", "failed"}:
+            normalized_status = "applied"
+
+        with self._condition:
+            requests = self._settings_requests.get(str(device_id), [])
+            request = next((item for item in requests if int(item.get("id", 0)) == int(request_id)), None)
+            if request is None:
+                raise KeyError(f"unknown settings request {request_id}")
+
+            request["status"] = normalized_status
+            request["updated_ms"] = now_ms()
+            if applied is not None:
+                request["applied"] = applied
+            if message:
+                request["message"] = str(message)[:1000]
+
+            self._settings_logs.setdefault(str(device_id), []).append(
+                {
+                    "level": normalized_status,
+                    "message": message or f"Settings request #{request_id} {normalized_status}",
+                    "data": {"request_id": request_id},
+                    "at_ms": request["updated_ms"],
+                }
+            )
+            self._settings_logs[str(device_id)] = self._settings_logs[str(device_id)][-120:]
+            self._version += 1
+            self._condition.notify_all()
+            return self._settings_request_public(request, include_values=False)
+
+    def _settings_request_public(self, request: dict[str, Any], include_values: bool) -> dict[str, Any]:
+        public = dict(request)
+        changes = list(public.get("changes") or [])
+        public["changes"] = changes if include_values else [mask_setting_value(change) for change in changes]
+        return public
+
+    def settings_snapshot(self, device_id: str | None = None, include_values: bool = False) -> dict[str, Any]:
+        with self._lock:
+            if device_id:
+                requests = self._settings_requests.get(str(device_id), [])
+                return {
+                    "device_id": str(device_id),
+                    "pending": [
+                        self._settings_request_public(request, include_values)
+                        for request in requests
+                        if request.get("status") == "pending"
+                    ],
+                    "logs": list(self._settings_logs.get(str(device_id), [])),
+                }
+
+            return {
+                "pending": {
+                    rover_id: [
+                        self._settings_request_public(request, include_values=False)
+                        for request in requests
+                        if request.get("status") == "pending"
+                    ]
+                    for rover_id, requests in self._settings_requests.items()
+                },
+                "logs": {rover_id: list(logs) for rover_id, logs in self._settings_logs.items()},
+            }
 
     def update_from_mqtt(
         self,
@@ -386,6 +574,7 @@ class DashboardState:
                 "devices": {key: record.to_dict() for key, record in self._devices.items()},
                 "peers": peers,
                 "events": list(self._events),
+                "settings": self.settings_snapshot(include_values=False),
             }
 
     def wait_for_update(self, version: int, timeout: float = 25.0) -> dict[str, Any]:
@@ -638,16 +827,105 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/events":
             self.handle_events()
             return
+        rover_route = self.rover_settings_route(parsed.path)
+        if rover_route is not None:
+            device_id, action = rover_route
+            if action == "":
+                self.send_json(self.dashboard_state.settings_snapshot(device_id=device_id, include_values=False))
+                return
+            if action == "pending":
+                if not self.require_rover_settings_token():
+                    return
+                self.send_json({"device_id": device_id, "pending": self.dashboard_state.pending_settings_requests(device_id)})
+                return
         self.serve_static(parsed.path)
 
-    def send_json(self, payload: dict[str, Any]) -> None:
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        rover_route = self.rover_settings_route(parsed.path)
+        if rover_route is None:
+            self.send_json_error(HTTPStatus.NOT_FOUND, "unknown endpoint")
+            return
+
+        device_id, action = rover_route
+        try:
+            payload = self.read_json_body()
+            if action == "":
+                changes = validate_settings_changes(payload)
+                queued = self.dashboard_state.queue_settings_request(device_id, changes)
+                self.send_json({"queued": queued}, HTTPStatus.ACCEPTED)
+                return
+
+            if action == "ack":
+                if not self.require_rover_settings_token():
+                    return
+                request_id = int(payload.get("request_id"))
+                acked = self.dashboard_state.ack_settings_request(
+                    device_id=device_id,
+                    request_id=request_id,
+                    status=str(payload.get("status") or "applied"),
+                    message=str(payload.get("message") or ""),
+                    applied=payload.get("applied") if isinstance(payload.get("applied"), dict) else None,
+                )
+                self.send_json({"acknowledged": acked})
+                return
+
+            if action == "logs":
+                if not self.require_rover_settings_token():
+                    return
+                entry = self.dashboard_state.append_settings_log(
+                    device_id=device_id,
+                    level=str(payload.get("level") or "info"),
+                    message=str(payload.get("message") or ""),
+                    data=payload.get("data") if isinstance(payload.get("data"), dict) else None,
+                )
+                self.send_json({"logged": entry}, HTTPStatus.CREATED)
+                return
+
+            self.send_json_error(HTTPStatus.NOT_FOUND, "unknown rover settings action")
+        except (KeyError, TypeError, ValueError) as exc:
+            self.send_json_error(HTTPStatus.BAD_REQUEST, str(exc))
+
+    def rover_settings_route(self, path: str) -> tuple[str, str] | None:
+        parts = path.strip("/").split("/")
+        if len(parts) < 4 or parts[0] != "api" or parts[1] != "rovers" or parts[3] != "settings":
+            return None
+        device_id = unquote(parts[2])
+        action = unquote(parts[4]) if len(parts) >= 5 else ""
+        return device_id, action
+
+    def read_json_body(self) -> dict[str, Any]:
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        if content_length <= 0 or content_length > 128 * 1024:
+            raise ValueError("invalid JSON body length")
+        raw = self.rfile.read(content_length)
+        decoded = json.loads(raw.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ValueError("JSON body must be an object")
+        return decoded
+
+    def require_rover_settings_token(self) -> bool:
+        token = str(self.dashboard_state.config.get("settings", {}).get("writeToken") or "")
+        if not token:
+            return True
+        auth = self.headers.get("Authorization", "")
+        header_token = self.headers.get("X-Dashboard-Settings-Token", "")
+        if auth == f"Bearer {token}" or header_token == token:
+            return True
+        self.send_json_error(HTTPStatus.FORBIDDEN, "invalid rover settings token")
+        return False
+
+    def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(encoded)
+
+    def send_json_error(self, status: HTTPStatus, message: str) -> None:
+        self.send_json({"error": message}, status)
 
     def handle_events(self) -> None:
         self.send_response(HTTPStatus.OK)
