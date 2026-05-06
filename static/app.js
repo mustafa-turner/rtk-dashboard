@@ -539,6 +539,37 @@ function updateSafety(device, snapshot, safetyRovers = buildSafetyRovers(device,
   byId("safety-peer-accuracy").textContent = numeric(telemetry.nearest_peer_accuracy_m, 3, " m");
 }
 
+function selectHeaderRover(deviceId) {
+  const snapshot = state.data;
+  const device = snapshot?.devices?.[deviceId];
+  if (!device) return;
+
+  state.selectedId = deviceId;
+  render(snapshot);
+
+  const latLng = getLatLng(device.telemetry || {});
+  if (latLng && state.map) state.map.setView(latLng, Math.max(state.map.getZoom(), 16));
+}
+
+function ensureHeaderRoverButton(list, deviceId) {
+  let row = Array.from(list.querySelectorAll(".rover-tab")).find((button) => button.dataset.deviceId === deviceId);
+  if (row) return row;
+
+  row = document.createElement("button");
+  row.type = "button";
+  row.className = "rover-tab";
+  row.dataset.deviceId = deviceId;
+  row.addEventListener("click", () => selectHeaderRover(row.dataset.deviceId));
+
+  const name = document.createElement("span");
+  name.className = "rover-tab-name";
+  const status = document.createElement("span");
+  status.className = "rover-tab-status";
+  row.append(name, status);
+
+  return row;
+}
+
 function renderHeaderRovers(snapshot) {
   const list = byId("header-rover-list");
   const devices = sortedDevices(snapshot);
@@ -551,25 +582,28 @@ function renderHeaderRovers(snapshot) {
     state.selectedId = devices[0].device_id;
   }
 
-  list.innerHTML = "";
-  devices.forEach((device) => {
+  list.querySelector(".header-empty")?.remove();
+  const activeIds = new Set(devices.map((device) => String(device.device_id)));
+  Array.from(list.querySelectorAll(".rover-tab")).forEach((row) => {
+    if (!activeIds.has(row.dataset.deviceId)) row.remove();
+  });
+
+  devices.forEach((device, index) => {
+    const deviceId = String(device.device_id);
     const telemetry = device.telemetry || {};
     const displayName = displayNameForDevice(device);
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = `rover-tab${device.device_id === state.selectedId ? " active" : ""}`;
+
+    const row = ensureHeaderRoverButton(list, deviceId);
+    const isActive = deviceId === state.selectedId;
+    row.className = `rover-tab${isActive ? " active" : ""}`;
     row.title = displayName;
-    row.innerHTML = `
-        <span class="rover-tab-name">${escapeHtml(displayName)}</span>
-        <span class="rover-tab-status ${statusClassForFix(telemetry.fix_mode)}"></span>
-      `;
-    row.addEventListener("click", () => {
-      state.selectedId = device.device_id;
-      render(snapshot);
-      const latLng = getLatLng(telemetry);
-      if (latLng && state.map) state.map.setView(latLng, Math.max(state.map.getZoom(), 16));
-    });
-    list.appendChild(row);
+    row.setAttribute("aria-pressed", String(isActive));
+    row.querySelector(".rover-tab-name").textContent = displayName;
+    row.querySelector(".rover-tab-status").className = `rover-tab-status ${statusClassForFix(telemetry.fix_mode)}`;
+
+    if (list.children[index] !== row) {
+      list.insertBefore(row, list.children[index] || null);
+    }
   });
 }
 
