@@ -1,0 +1,16 @@
+[Unit]
+Description=RTK MQTT Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/rtk-dashboard
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/pi/rtk-dashboard/server.py --config /home/pi/rtk-dashboard/config.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

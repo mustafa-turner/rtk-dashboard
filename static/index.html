@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Crane Rover Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <h1 id="dashboard-title">Crane Rover Dashboard</h1>
+          <div class="subline">
+            <span id="mqtt-address">MQTT</span>
+            <span id="device-count">0 rovers</span>
+            <span id="peer-count">0 peers</span>
+          </div>
+        </div>
+        <div class="header-rover-list" id="header-rover-list"></div>
+        <div class="status-strip">
+          <div class="status-dot" id="live-dot"></div>
+          <span id="live-label">Waiting</span>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="map-panel">
+          <div id="map"></div>
+          <div class="map-overlay">
+            <div class="selected-label" id="selected-label">No rover selected</div>
+            <button type="button" id="center-map" title="Center on rover">C</button>
+          </div>
+        </section>
+
+        <aside class="side-panel">
+          <section class="safety-panel safe-unknown" id="safety-panel">
+            <div class="safety-head">
+              <div>
+                <div class="panel-title">Safe Distance</div>
+                <div class="safety-pair" id="safety-pair">No crane pair</div>
+              </div>
+              <div class="safety-state" id="safety-state">WAITING</div>
+            </div>
+            <div class="safety-value-row">
+              <strong id="safety-value">-</strong>
+              <span>m</span>
+            </div>
+            <div class="safety-rover-grid" id="safety-rover-grid"></div>
+            <div class="safety-detail-grid">
+              <div>
+                <span>Raw distance</span>
+                <strong id="safety-raw">-</strong>
+              </div>
+              <div>
+                <span>Uncertainty</span>
+                <strong id="safety-uncertainty">-</strong>
+              </div>
+              <div>
+                <span>Local accuracy</span>
+                <strong id="safety-local-accuracy">-</strong>
+              </div>
+              <div>
+                <span>Peer accuracy</span>
+                <strong id="safety-peer-accuracy">-</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="summary-panel">
+            <div class="panel-title">Rover Telemetry</div>
+            <div class="telemetry-compare" id="telemetry-compare"></div>
+          </section>
+
+          <section class="details-panel">
+            <details>
+              <summary>More Details</summary>
+              <div class="details-body">
+                <div class="details-section">
+                  <div id="raw-fields" class="raw-fields"></div>
+                </div>
+              </div>
+            </details>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

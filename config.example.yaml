@@ -1,0 +1,23 @@
+mqtt:
+  host: 0.0.0.0
+  port: 1883
+
+http:
+  host: 0.0.0.0
+  port: 8080
+
+udpPeers:
+  enabled: true
+  host: 0.0.0.0
+  port: 5005
+  maxAgeSec: 5
+
+dashboard:
+  title: Crane Rover Dashboard
+  roverNames:
+    # Match against device_id, MQTT client ID, username, or source IP.
+    # 192.168.1.21: rover-alpha
+  defaultCenter:
+    latitude: -2.5489
+    longitude: 118.0149
+    zoom: 5
