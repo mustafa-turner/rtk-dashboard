@@ -4,7 +4,9 @@ import argparse
 import ipaddress
 import json
 import logging
+import math
 import os
+import sqlite3
 import socket
 import socketserver
 import struct
@@ -15,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 try:
     import yaml
@@ -25,6 +27,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "static"
+MBTILES_ROOT = ROOT / "mbtiles"
 
 FIX_MODE_LABELS = {
     0: "NO FIX",
@@ -142,6 +145,80 @@ def load_config(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def open_mbtiles(path: Path) -> sqlite3.Connection:
+    uri_path = quote(str(path.resolve()), safe="/")
+    return sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
+
+
+def parse_mbtiles_bounds(value: Any) -> list[float] | None:
+    try:
+        bounds = [float(part.strip()) for part in str(value).split(",")]
+    except (TypeError, ValueError):
+        return None
+    if len(bounds) != 4 or not all(math.isfinite(part) for part in bounds):
+        return None
+    west, south, east, north = bounds
+    if west >= east or south >= north:
+        return None
+    return [west, south, east, north]
+
+
+def normalize_tile_format(value: Any) -> str:
+    tile_format = str(value or "png").strip().lower().lstrip(".")
+    if tile_format == "jpeg":
+        return "jpg"
+    if tile_format in {"jpg", "png", "webp", "pbf"}:
+        return tile_format
+    return "png"
+
+
+def tile_content_type(tile_format: str) -> str:
+    return {
+        "jpg": "image/jpeg",
+        "png": "image/png",
+        "webp": "image/webp",
+        "pbf": "application/x-protobuf",
+    }.get(normalize_tile_format(tile_format), "application/octet-stream")
+
+
+def read_mbtiles_info(path: Path) -> dict[str, Any] | None:
+    try:
+        with open_mbtiles(path) as con:
+            metadata = {str(name): value for name, value in con.execute("select name, value from metadata")}
+            min_zoom, max_zoom = con.execute("select min(zoom_level), max(zoom_level) from tiles").fetchone()
+    except sqlite3.Error as exc:
+        logging.warning("MBTiles metadata skipped for %s: %s", path.name, exc)
+        return None
+
+    if min_zoom is None or max_zoom is None:
+        return None
+
+    tile_format = normalize_tile_format(metadata.get("format"))
+    tileset_id = path.stem
+    return {
+        "id": tileset_id,
+        "name": str(metadata.get("name") or tileset_id),
+        "description": str(metadata.get("description") or ""),
+        "type": str(metadata.get("type") or "overlay"),
+        "format": tile_format,
+        "bounds": parse_mbtiles_bounds(metadata.get("bounds")),
+        "minZoom": int(min_zoom),
+        "maxZoom": int(max_zoom),
+        "tileUrl": f"/tiles/{quote(tileset_id, safe='')}/{{z}}/{{x}}/{{y}}.{tile_format}",
+    }
+
+
+def discover_mbtiles() -> list[dict[str, Any]]:
+    if not MBTILES_ROOT.exists():
+        return []
+    tilesets: list[dict[str, Any]] = []
+    for path in sorted(MBTILES_ROOT.glob("*.mbtiles")):
+        info = read_mbtiles_info(path)
+        if info is not None:
+            tilesets.append(info)
+    return tilesets
+
+
 def coerce_value(value: Any) -> Any:
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
@@ -236,6 +313,7 @@ class DashboardState:
         self._peers: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
         self.started_ms = now_ms()
+        self.mbtiles = discover_mbtiles()
 
     def configured_rover_name(self, *keys: str) -> str:
         names = self.config.get("dashboard", {}).get("roverNames", {})
@@ -382,6 +460,7 @@ class DashboardState:
                     "http": self.config["http"],
                     "udpPeers": self.config["udpPeers"],
                     "dashboard": self.config["dashboard"],
+                    "mbtiles": self.mbtiles,
                 },
                 "devices": {key: record.to_dict() for key, record in self._devices.items()},
                 "peers": peers,
@@ -638,6 +717,9 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/events":
             self.handle_events()
             return
+        if parsed.path.startswith("/tiles/"):
+            self.serve_mbtiles_tile(parsed.path)
+            return
         self.serve_static(parsed.path)
 
     def send_json(self, payload: dict[str, Any]) -> None:
@@ -666,6 +748,61 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
+
+    def serve_mbtiles_tile(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 5 or parts[0] != "tiles":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        tileset_id = unquote(parts[1])
+        y_name = parts[4]
+        y_text, _, extension = y_name.partition(".")
+        try:
+            zoom = int(parts[2])
+            tile_column = int(parts[3])
+            tile_y = int(y_text)
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        if zoom < 0 or tile_column < 0 or tile_y < 0 or tile_column >= 2**zoom or tile_y >= 2**zoom:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        tile_path = (MBTILES_ROOT / f"{tileset_id}.mbtiles").resolve()
+        try:
+            tile_path.relative_to(MBTILES_ROOT.resolve())
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if not tile_path.exists():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        tile_row = (2**zoom - 1) - tile_y
+        try:
+            with open_mbtiles(tile_path) as con:
+                row = con.execute(
+                    "select tile_data from tiles where zoom_level = ? and tile_column = ? and tile_row = ?",
+                    (zoom, tile_column, tile_row),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            logging.warning("MBTiles tile read failed for %s: %s", tile_path.name, exc)
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if row is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        data = bytes(row[0])
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", tile_content_type(extension))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
 
     def serve_static(self, path: str) -> None:
         if path in {"", "/"}:

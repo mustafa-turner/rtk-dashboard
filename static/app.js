@@ -2,12 +2,13 @@ const state = {
   data: null,
   selectedId: null,
   map: null,
+  tilesetBounds: null,
   deviceMarkers: new Map(),
   peerMarkers: new Map(),
   eventStreamConnected: true,
 };
 
-const SAFETY_STALE_MS = 2000;
+const ROVER_DISCONNECTED_MS = 2000;
 
 const fixLabels = {
   0: "NO FIX",
@@ -64,17 +65,29 @@ function snapshotNowMs(snapshot) {
   return serverNowMs + Math.max(0, Date.now() - receivedAtMs);
 }
 
-function roverAgeMs(rover, snapshot) {
-  const lastSeenMs = Number(rover?.lastSeenMs);
+function ageMsFromLastSeen(lastSeenMs, snapshot) {
+  lastSeenMs = Number(lastSeenMs);
   if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) {
     return null;
   }
   return Math.max(0, snapshotNowMs(snapshot) - lastSeenMs);
 }
 
-function roverIsStaleForSafety(rover, snapshot) {
+function roverAgeMs(rover, snapshot) {
+  return ageMsFromLastSeen(rover?.lastSeenMs, snapshot);
+}
+
+function roverIsDisconnectedForSafety(rover, snapshot) {
+  if (!rover || rover.kind === "placeholder" || rover.kind === "nearest") {
+    return true;
+  }
   const ageMs = roverAgeMs(rover, snapshot);
-  return ageMs !== null && ageMs > SAFETY_STALE_MS;
+  return ageMs === null || ageMs > ROVER_DISCONNECTED_MS;
+}
+
+function deviceIsDisconnected(device, snapshot) {
+  const ageMs = ageMsFromLastSeen(device?.last_seen_ms, snapshot);
+  return ageMs === null || ageMs > ROVER_DISCONNECTED_MS;
 }
 
 function statusClassForFix(fixMode) {
@@ -84,22 +97,24 @@ function statusClassForFix(fixMode) {
 }
 
 function safeDistanceClass(value) {
+  if (value === null || value === undefined || value === "") return "unknown";
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) return "unknown";
   if (number < 25) return "bad";
-  // if (number < 25) return "warn";
   return "good";
 }
 
 function safeDistanceLabel(value) {
   const status = safeDistanceClass(value);
-  if (status === "good") return "CLEAR";
-  if (status === "warn") return "CAUTION";
+  if (status === "good") return "SAFE";
   if (status === "bad") return "DANGER";
   return "WAITING";
 }
 
 function safeDistanceValue(value) {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) {
     return "-";
@@ -248,6 +263,62 @@ function getLatLng(telemetry) {
   return null;
 }
 
+function primaryTileset(config) {
+  const tilesets = Array.isArray(config?.mbtiles) ? config.mbtiles : [];
+  return tilesets.find((tileset) => String(tileset.id || "").toLowerCase() === "psp") || tilesets[0] || null;
+}
+
+function leafletBoundsFromTileset(tileset) {
+  const bounds = tileset?.bounds;
+  if (!Array.isArray(bounds) || bounds.length !== 4) {
+    return null;
+  }
+  const [west, south, east, north] = bounds.map(Number);
+  if (![west, south, east, north].every(Number.isFinite)) {
+    return null;
+  }
+  return L.latLngBounds([south, west], [north, east]);
+}
+
+function addMbtilesOverlay(config) {
+  const tileset = primaryTileset(config);
+  if (!tileset?.tileUrl) {
+    state.tilesetBounds = null;
+    return;
+  }
+
+  const bounds = leafletBoundsFromTileset(tileset);
+  state.tilesetBounds = bounds;
+  const pane = state.map.getPane("mbtilesPane") || state.map.createPane("mbtilesPane");
+  pane.style.zIndex = 350;
+  pane.style.pointerEvents = "none";
+
+  L.tileLayer(tileset.tileUrl, {
+    minZoom: Number(tileset.minZoom) || 0,
+    maxZoom: 22,
+    maxNativeZoom: Number(tileset.maxZoom) || 21,
+    pane: "mbtilesPane",
+    zIndex: 350,
+    opacity: 1,
+    attribution: escapeHtml(tileset.name || tileset.id || "MBTiles overlay"),
+  }).addTo(state.map);
+
+  if (bounds) {
+    fitToTilesetBounds(tileset);
+  }
+}
+
+function fitToTilesetBounds(tileset) {
+  if (!state.map || !state.tilesetBounds) return;
+  window.requestAnimationFrame(() => {
+    state.map.invalidateSize();
+    state.map.fitBounds(state.tilesetBounds, {
+      padding: [24, 24],
+      maxZoom: Number(tileset?.maxZoom) || 21,
+    });
+  });
+}
+
 function initMap(config) {
   if (typeof L === "undefined") {
     const mapEl = byId("map");
@@ -258,17 +329,22 @@ function initMap(config) {
   }
 
   const center = config?.dashboard?.defaultCenter || {};
-  state.map = L.map("map", { zoomControl: true }).setView(
+  state.map = L.map("map", { zoomControl: true, maxZoom: 22 }).setView(
     [Number(center.latitude) || -2.5489, Number(center.longitude) || 118.0149],
     Number(center.zoom) || 5
   );
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors",
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 22,
+    attribution: "Tiles &copy; Esri",
   }).addTo(state.map);
+  addMbtilesOverlay(config);
 
   byId("center-map").addEventListener("click", () => {
     if (!state.map) return;
+    if (state.tilesetBounds) {
+      state.map.fitBounds(state.tilesetBounds, { padding: [24, 24], maxZoom: 21 });
+      return;
+    }
     const selected = selectedDevice();
     const latLng = selected ? getLatLng(selected.telemetry) : firstDeviceLatLng();
     if (latLng) {
@@ -318,12 +394,12 @@ function updateHeader(snapshot) {
     return;
   }
   const ageMs = nowMs - selected.last_seen_ms;
-  if (ageMs < 6000) {
+  if (Number.isFinite(ageMs) && ageMs <= ROVER_DISCONNECTED_MS) {
     liveDot.classList.add("live");
     liveLabel.textContent = "Live";
   } else {
     liveDot.classList.add("offline");
-    liveLabel.textContent = "Stale";
+    liveLabel.textContent = "Disconnected";
   }
 }
 
@@ -558,23 +634,23 @@ function renderSafetyRovers(rovers) {
 
 function updateSafety(device, snapshot, safetyRovers = buildSafetyRovers(device, snapshot)) {
   const telemetry = device?.telemetry || {};
-  const safetyIsStale = safetyRovers.slice(0, 2).some((rover) => roverIsStaleForSafety(rover, snapshot));
-  const safeDistance = safetyIsStale ? null : telemetry.nearest_peer_safe_distance_m;
-  const stateClass = safeDistanceClass(safeDistance);
+  const safetyDisconnected = safetyRovers.slice(0, 2).some((rover) => roverIsDisconnectedForSafety(rover, snapshot));
+  const safeDistance = safetyDisconnected ? null : telemetry.nearest_peer_safe_distance_m;
+  const stateClass = safetyDisconnected ? "unknown" : safeDistanceClass(safeDistance);
   const roverOne = safetyRovers[0]?.name || "-";
   const roverTwo = safetyRovers[1]?.name || telemetry.nearest_peer_id || "-";
 
   byId("safety-panel").className = `safety-panel safe-${stateClass}`;
-  byId("safety-state").textContent = safeDistanceLabel(safeDistance);
+  byId("safety-state").textContent = safetyDisconnected ? "DISCONNECTED" : safeDistanceLabel(safeDistance);
   byId("safety-value").textContent = safeDistanceValue(safeDistance);
   byId("safety-pair").textContent = device ? `${roverOne} to ${roverTwo}` : "No crane pair";
   renderSafetyRovers(safetyRovers);
-  byId("safety-raw").textContent = safetyIsStale ? "-" : numeric(telemetry.nearest_peer_distance_m, 2, " m");
-  byId("safety-uncertainty").textContent = safetyIsStale
+  byId("safety-raw").textContent = safetyDisconnected ? "-" : numeric(telemetry.nearest_peer_distance_m, 2, " m");
+  byId("safety-uncertainty").textContent = safetyDisconnected
     ? "-"
     : numeric(telemetry.nearest_peer_uncertainty_m, 3, " m");
-  byId("safety-local-accuracy").textContent = safetyIsStale ? "-" : numeric(telemetry.local_accuracy_m, 3, " m");
-  byId("safety-peer-accuracy").textContent = safetyIsStale
+  byId("safety-local-accuracy").textContent = safetyDisconnected ? "-" : numeric(telemetry.local_accuracy_m, 3, " m");
+  byId("safety-peer-accuracy").textContent = safetyDisconnected
     ? "-"
     : numeric(telemetry.nearest_peer_accuracy_m, 3, " m");
 }
@@ -632,6 +708,7 @@ function renderHeaderRovers(snapshot) {
     const deviceId = String(device.device_id);
     const telemetry = device.telemetry || {};
     const displayName = displayNameForDevice(device);
+    const statusClass = deviceIsDisconnected(device, snapshot) ? "" : statusClassForFix(telemetry.fix_mode);
 
     const row = ensureHeaderRoverButton(list, deviceId);
     const isActive = deviceId === state.selectedId;
@@ -639,7 +716,7 @@ function renderHeaderRovers(snapshot) {
     row.title = displayName;
     row.setAttribute("aria-pressed", String(isActive));
     row.querySelector(".rover-tab-name").textContent = displayName;
-    row.querySelector(".rover-tab-status").className = `rover-tab-status ${statusClassForFix(telemetry.fix_mode)}`;
+    row.querySelector(".rover-tab-status").className = `rover-tab-status ${statusClass}`.trim();
 
     if (list.children[index] !== row) {
       list.insertBefore(row, list.children[index] || null);
@@ -657,18 +734,20 @@ function updateMarkers(snapshot) {
     if (!latLng) return;
     seenDevices.add(device.device_id);
     const title = `${displayNameForDevice(device)} - ${telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN"}`;
+    const fillColor = deviceIsDisconnected(device, snapshot) ? "#657080" : "#0f7490";
     let marker = state.deviceMarkers.get(device.device_id);
     if (!marker) {
       marker = L.circleMarker(latLng, {
         radius: 9,
         color: "#ffffff",
         weight: 3,
-        fillColor: "#0f7490",
+        fillColor,
         fillOpacity: 0.95,
       }).addTo(state.map);
       state.deviceMarkers.set(device.device_id, marker);
     } else {
       marker.setLatLng(latLng);
+      marker.setStyle({ fillColor });
     }
     marker.bindPopup(escapeHtml(title));
   });
@@ -798,6 +877,8 @@ function refreshAgeSensitiveUi() {
   }
   updateSafety(selected, snapshot, safetyRovers);
   renderTelemetryCompare(safetyRovers);
+  renderHeaderRovers(snapshot);
+  updateMarkers(snapshot);
 }
 
 function escapeHtml(value) {

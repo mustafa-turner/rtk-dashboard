@@ -406,16 +406,12 @@ h1 {
   background: #0f684c;
 }
 
-.safe-warn {
-  background: #8a5a13;
-}
-
 .safe-bad {
   background: #9f2f10;
 }
 
 .safe-unknown {
-  background: var(--steel);
+  background: #667085;
 }
 
 .panel-title {
