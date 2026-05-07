@@ -248,6 +248,19 @@ def normalize_position(payload: dict[str, Any]) -> None:
         payload["position"] = [payload["longitude"], payload["latitude"]]
 
 
+def has_valid_position(payload: dict[str, Any]) -> bool:
+    lat = payload.get("latitude")
+    lon = payload.get("longitude")
+    if lat is None or lon is None:
+        return False
+    try:
+        lat_num = float(lat)
+        lon_num = float(lon)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(lat_num) and math.isfinite(lon_num) and (lat_num != 0 or lon_num != 0)
+
+
 def is_ip_address(value: str) -> bool:
     try:
         ipaddress.ip_address(value)
@@ -285,6 +298,7 @@ class DeviceRecord:
     display_name: str = ""
     telemetry: dict[str, Any] = field(default_factory=dict)
     last_seen_ms: int = 0
+    last_position_seen_ms: int = 0
     mqtt_client_id: str = ""
     source_host: str = ""
     username: str = ""
@@ -296,6 +310,7 @@ class DeviceRecord:
             "display_name": self.display_name or self.device_id,
             "telemetry": self.telemetry,
             "last_seen_ms": self.last_seen_ms,
+            "last_position_seen_ms": self.last_position_seen_ms,
             "mqtt_client_id": self.mqtt_client_id,
             "source_host": self.source_host,
             "username": self.username,
@@ -402,6 +417,8 @@ class DashboardState:
                 record.info = info_payload
             else:
                 normalize_position(payload)
+                if has_valid_position(payload):
+                    record.last_position_seen_ms = now_ms()
                 record.telemetry.update(payload)
                 record.telemetry["fix_mode_label"] = FIX_MODE_LABELS.get(record.telemetry.get("fix_mode"), "UNKNOWN")
                 record.telemetry["ntrip_status_label"] = NTRIP_STATUS_LABELS.get(
@@ -435,6 +452,7 @@ class DashboardState:
             or device_id
         )
         normalize_position(peer)
+        peer["last_position_seen_ms"] = peer["last_seen_ms"] if has_valid_position(peer) else 0
 
         with self._condition:
             self._peers[device_id] = peer

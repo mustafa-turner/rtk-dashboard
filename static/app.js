@@ -77,11 +77,23 @@ function roverAgeMs(rover, snapshot) {
   return ageMsFromLastSeen(rover?.lastSeenMs, snapshot);
 }
 
+function roverPositionAgeMs(rover, snapshot) {
+  return ageMsFromLastSeen(rover?.lastPositionSeenMs, snapshot);
+}
+
 function roverIsDisconnectedForSafety(rover, snapshot) {
   if (!rover || rover.kind === "placeholder" || rover.kind === "nearest") {
     return true;
   }
   const ageMs = roverAgeMs(rover, snapshot);
+  return ageMs === null || ageMs > ROVER_DISCONNECTED_MS;
+}
+
+function roverIsWaitingForPosition(rover, snapshot) {
+  if (!rover || rover.kind === "placeholder" || rover.kind === "nearest") {
+    return true;
+  }
+  const ageMs = roverPositionAgeMs(rover, snapshot);
   return ageMs === null || ageMs > ROVER_DISCONNECTED_MS;
 }
 
@@ -280,6 +292,63 @@ function leafletBoundsFromTileset(tileset) {
   return L.latLngBounds([south, west], [north, east]);
 }
 
+function tileUrlForCoords(tileUrl, coords) {
+  return tileUrl
+    .replace("{z}", coords.z)
+    .replace("{x}", coords.x)
+    .replace("{y}", coords.y);
+}
+
+function makeWhiteTransparent(imageData) {
+  const data = imageData.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+    const brightest = Math.max(red, green, blue);
+    const darkest = Math.min(red, green, blue);
+    const brightness = (red + green + blue) / 3;
+    const chroma = brightest - darkest;
+
+    if (brightness > 238 && chroma < 28) {
+      data[index + 3] = 0;
+    } else if (brightness > 205 && chroma < 42) {
+      data[index + 3] = Math.min(data[index + 3], Math.round(((238 - brightness) / 33) * 255));
+    }
+  }
+}
+
+function createTransparentMbtilesLayer(tileset) {
+  return L.GridLayer.extend({
+    createTile(coords, done) {
+      const tileSize = this.getTileSize();
+      const tile = document.createElement("canvas");
+      tile.width = tileSize.x;
+      tile.height = tileSize.y;
+
+      const image = new Image();
+      tile._mbtilesImage = image;
+      image.onload = () => {
+        const context = tile.getContext("2d");
+        context.drawImage(image, 0, 0, tile.width, tile.height);
+        try {
+          const imageData = context.getImageData(0, 0, tile.width, tile.height);
+          makeWhiteTransparent(imageData);
+          context.putImageData(imageData, 0, 0);
+        } catch (error) {
+          console.warn("Unable to mask MBTiles no-data pixels", error);
+        }
+        done(null, tile);
+      };
+      image.onerror = () => {
+        done(null, tile);
+      };
+      image.src = tileUrlForCoords(tileset.tileUrl, coords);
+      return tile;
+    },
+  });
+}
+
 function addMbtilesOverlay(config) {
   const tileset = primaryTileset(config);
   if (!tileset?.tileUrl) {
@@ -293,13 +362,13 @@ function addMbtilesOverlay(config) {
   pane.style.zIndex = 350;
   pane.style.pointerEvents = "none";
 
-  L.tileLayer(tileset.tileUrl, {
+  const MaskedMbtilesLayer = createTransparentMbtilesLayer(tileset);
+  new MaskedMbtilesLayer({
     minZoom: Number(tileset.minZoom) || 0,
     maxZoom: 22,
     maxNativeZoom: Number(tileset.maxZoom) || 21,
     pane: "mbtilesPane",
     zIndex: 350,
-    opacity: 1,
     attribution: escapeHtml(tileset.name || tileset.id || "MBTiles overlay"),
   }).addTo(state.map);
 
@@ -412,6 +481,7 @@ function roverSummaryFromDevice(device, role, snapshot) {
     name: displayNameForDevice(device),
     id: device?.device_id || "",
     lastSeenMs: device?.last_seen_ms || 0,
+    lastPositionSeenMs: device?.last_position_seen_ms || 0,
     telemetry,
     fix: telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN",
     accuracy: numeric(telemetry.local_accuracy_m, 3, " m"),
@@ -429,6 +499,7 @@ function roverSummaryFromPeer(peer, role, snapshot, selectedTelemetry) {
     name: displayNameForPeer(peer),
     id: peer?.device_id || "",
     lastSeenMs: peer?.last_seen_ms || 0,
+    lastPositionSeenMs: peer?.last_position_seen_ms || 0,
     telemetry: peer || {},
     fix:
       peer?.fix_label ||
@@ -449,6 +520,7 @@ function roverSummaryFromNearestTelemetry(peerId, telemetry, role) {
     name: String(peerId || "Waiting"),
     id: String(peerId || ""),
     lastSeenMs: 0,
+    lastPositionSeenMs: 0,
     telemetry: {},
     fix: fixLabels[telemetry?.nearest_peer_fix_mode] || "UNKNOWN",
     accuracy: numeric(telemetry?.nearest_peer_accuracy_m, 3, " m"),
@@ -464,6 +536,7 @@ function placeholderRoverSummary(role) {
     name: "Waiting",
     id: "",
     lastSeenMs: 0,
+    lastPositionSeenMs: 0,
     telemetry: {},
     fix: "UNKNOWN",
     accuracy: "-",
@@ -635,8 +708,11 @@ function renderSafetyRovers(rovers) {
 function updateSafety(device, snapshot, safetyRovers = buildSafetyRovers(device, snapshot)) {
   const telemetry = device?.telemetry || {};
   const safetyDisconnected = safetyRovers.slice(0, 2).some((rover) => roverIsDisconnectedForSafety(rover, snapshot));
-  const safeDistance = safetyDisconnected ? null : telemetry.nearest_peer_safe_distance_m;
-  const stateClass = safetyDisconnected ? "unknown" : safeDistanceClass(safeDistance);
+  const safetyWaitingForPosition =
+    !safetyDisconnected && safetyRovers.slice(0, 2).some((rover) => roverIsWaitingForPosition(rover, snapshot));
+  const safetyUnavailable = safetyDisconnected || safetyWaitingForPosition;
+  const safeDistance = safetyUnavailable ? null : telemetry.nearest_peer_safe_distance_m;
+  const stateClass = safetyUnavailable ? "unknown" : safeDistanceClass(safeDistance);
   const roverOne = safetyRovers[0]?.name || "-";
   const roverTwo = safetyRovers[1]?.name || telemetry.nearest_peer_id || "-";
 
@@ -645,12 +721,12 @@ function updateSafety(device, snapshot, safetyRovers = buildSafetyRovers(device,
   byId("safety-value").textContent = safeDistanceValue(safeDistance);
   byId("safety-pair").textContent = device ? `${roverOne} to ${roverTwo}` : "No crane pair";
   renderSafetyRovers(safetyRovers);
-  byId("safety-raw").textContent = safetyDisconnected ? "-" : numeric(telemetry.nearest_peer_distance_m, 2, " m");
-  byId("safety-uncertainty").textContent = safetyDisconnected
+  byId("safety-raw").textContent = safetyUnavailable ? "-" : numeric(telemetry.nearest_peer_distance_m, 2, " m");
+  byId("safety-uncertainty").textContent = safetyUnavailable
     ? "-"
     : numeric(telemetry.nearest_peer_uncertainty_m, 3, " m");
-  byId("safety-local-accuracy").textContent = safetyDisconnected ? "-" : numeric(telemetry.local_accuracy_m, 3, " m");
-  byId("safety-peer-accuracy").textContent = safetyDisconnected
+  byId("safety-local-accuracy").textContent = safetyUnavailable ? "-" : numeric(telemetry.local_accuracy_m, 3, " m");
+  byId("safety-peer-accuracy").textContent = safetyUnavailable
     ? "-"
     : numeric(telemetry.nearest_peer_accuracy_m, 3, " m");
 }
