@@ -9,10 +9,13 @@ const state = {
 };
 
 const ROVER_DISCONNECTED_MS = 2000;
-const ROVER_ICON_MIN_ZOOM = 16;
+const ROVER_ICON_HIDE_ZOOM = 14;
+const ROVER_ICON_BASE_ZOOM = 16;
 const ROVER_ICON_URL = "/icons/CC.png";
-const ROVER_ICON_WIDTH = 28;
-const ROVER_ICON_HEIGHT = Math.round((ROVER_ICON_WIDTH * 435) / 124);
+const ROVER_ICON_BASE_WIDTH = 10;
+const ROVER_ICON_MIN_WIDTH = 5;
+const ROVER_ICON_MAX_WIDTH = 999;
+const ROVER_ICON_ASPECT_RATIO = 435 / 124;
 
 const fixLabels = {
   0: "NO FIX",
@@ -279,48 +282,62 @@ function getLatLng(telemetry) {
   return null;
 }
 
-function shouldUseRoverIcon() {
-  return Boolean(state.map && state.map.getZoom() >= ROVER_ICON_MIN_ZOOM);
+function roverIconSizeForZoom() {
+  const zoom = state.map?.getZoom() ?? ROVER_ICON_BASE_ZOOM;
+
+  if (zoom < ROVER_ICON_HIDE_ZOOM) {
+    return null;
+  }
+
+  const scale = 2 ** (zoom - ROVER_ICON_BASE_ZOOM);
+  const width = Math.max(
+    ROVER_ICON_MIN_WIDTH,
+    Math.min(ROVER_ICON_MAX_WIDTH, ROVER_ICON_BASE_WIDTH * scale)
+  );
+  const height = Math.round(width * ROVER_ICON_ASPECT_RATIO);
+
+  return { width, height };
 }
 
 function roverIconForMarker({ variant, status }) {
+  const size = roverIconSizeForZoom();
+  if (!size) return null;
+
   return L.divIcon({
     className: `rover-image-marker ${variant} ${status}`,
     html: `<img src="${ROVER_ICON_URL}" alt="">`,
-    iconSize: [ROVER_ICON_WIDTH, ROVER_ICON_HEIGHT],
-    iconAnchor: [ROVER_ICON_WIDTH / 2, ROVER_ICON_HEIGHT / 2],
-    popupAnchor: [0, -ROVER_ICON_HEIGHT / 2],
+    iconSize: [size.width, size.height],
+    iconAnchor: [size.width / 2, size.height / 2],
+    popupAnchor: [0, -size.height / 2],
   });
 }
 
 function createRoverMarker(latLng, options) {
-  const mode = shouldUseRoverIcon() ? "icon" : "dot";
-  const marker =
-    mode === "icon"
-      ? L.marker(latLng, {
-          icon: roverIconForMarker(options),
-          zIndexOffset: options.zIndexOffset || 0,
-        })
-      : L.circleMarker(latLng, options.dotStyle);
-  marker._roverMarkerMode = mode;
+  const icon = roverIconForMarker(options);
+  if (!icon) return null;
+
+  const marker = L.marker(latLng, {
+    icon,
+    zIndexOffset: options.zIndexOffset || 0,
+  });
+
   return marker.addTo(state.map);
 }
 
 function updateRoverMarker(marker, latLng, options) {
-  const mode = shouldUseRoverIcon() ? "icon" : "dot";
-  if (!marker || marker._roverMarkerMode !== mode) {
-    if (marker) {
-      marker.remove();
-    }
+  const icon = roverIconForMarker(options);
+
+  if (!icon) {
+    if (marker) marker.remove();
+    return null;
+  }
+
+  if (!marker) {
     return createRoverMarker(latLng, options);
   }
 
   marker.setLatLng(latLng);
-  if (mode === "icon") {
-    marker.setIcon(roverIconForMarker(options));
-  } else {
-    marker.setStyle(options.dotStyle);
-  }
+  marker.setIcon(icon);
   return marker;
 }
 

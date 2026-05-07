@@ -672,6 +672,9 @@ summary {
   object-fit: contain;
   filter: drop-shadow(0 2px 3px rgba(25, 27, 31, 0.45));
   pointer-events: none;
+
+  transform: rotate(25deg);
+  transform-origin: 50% 50%;
 }
 
 .rover-image-marker::after {
