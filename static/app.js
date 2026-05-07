@@ -9,6 +9,10 @@ const state = {
 };
 
 const ROVER_DISCONNECTED_MS = 2000;
+const ROVER_ICON_MIN_ZOOM = 16;
+const ROVER_ICON_URL = "/icons/CC.png";
+const ROVER_ICON_WIDTH = 28;
+const ROVER_ICON_HEIGHT = Math.round((ROVER_ICON_WIDTH * 435) / 124);
 
 const fixLabels = {
   0: "NO FIX",
@@ -275,6 +279,51 @@ function getLatLng(telemetry) {
   return null;
 }
 
+function shouldUseRoverIcon() {
+  return Boolean(state.map && state.map.getZoom() >= ROVER_ICON_MIN_ZOOM);
+}
+
+function roverIconForMarker({ variant, status }) {
+  return L.divIcon({
+    className: `rover-image-marker ${variant} ${status}`,
+    html: `<img src="${ROVER_ICON_URL}" alt="">`,
+    iconSize: [ROVER_ICON_WIDTH, ROVER_ICON_HEIGHT],
+    iconAnchor: [ROVER_ICON_WIDTH / 2, ROVER_ICON_HEIGHT / 2],
+    popupAnchor: [0, -ROVER_ICON_HEIGHT / 2],
+  });
+}
+
+function createRoverMarker(latLng, options) {
+  const mode = shouldUseRoverIcon() ? "icon" : "dot";
+  const marker =
+    mode === "icon"
+      ? L.marker(latLng, {
+          icon: roverIconForMarker(options),
+          zIndexOffset: options.zIndexOffset || 0,
+        })
+      : L.circleMarker(latLng, options.dotStyle);
+  marker._roverMarkerMode = mode;
+  return marker.addTo(state.map);
+}
+
+function updateRoverMarker(marker, latLng, options) {
+  const mode = shouldUseRoverIcon() ? "icon" : "dot";
+  if (!marker || marker._roverMarkerMode !== mode) {
+    if (marker) {
+      marker.remove();
+    }
+    return createRoverMarker(latLng, options);
+  }
+
+  marker.setLatLng(latLng);
+  if (mode === "icon") {
+    marker.setIcon(roverIconForMarker(options));
+  } else {
+    marker.setStyle(options.dotStyle);
+  }
+  return marker;
+}
+
 function primaryTileset(config) {
   const tilesets = Array.isArray(config?.mbtiles) ? config.mbtiles : [];
   return tilesets.find((tileset) => String(tileset.id || "").toLowerCase() === "psp") || tilesets[0] || null;
@@ -407,6 +456,7 @@ function initMap(config) {
     attribution: "Tiles &copy; Esri",
   }).addTo(state.map);
   addMbtilesOverlay(config);
+  state.map.on("zoomend", () => updateMarkers(state.data || { devices: {}, peers: {} }));
 
   byId("center-map").addEventListener("click", () => {
     if (!state.map) return;
@@ -810,21 +860,21 @@ function updateMarkers(snapshot) {
     if (!latLng) return;
     seenDevices.add(device.device_id);
     const title = `${displayNameForDevice(device)} - ${telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN"}`;
-    const fillColor = deviceIsDisconnected(device, snapshot) ? "#657080" : "#0f7490";
-    let marker = state.deviceMarkers.get(device.device_id);
-    if (!marker) {
-      marker = L.circleMarker(latLng, {
+    const disconnected = deviceIsDisconnected(device, snapshot);
+    const fillColor = disconnected ? "#657080" : "#0f7490";
+    const marker = updateRoverMarker(state.deviceMarkers.get(device.device_id), latLng, {
+      variant: "device",
+      status: disconnected ? "offline" : "live",
+      zIndexOffset: 200,
+      dotStyle: {
         radius: 9,
         color: "#ffffff",
         weight: 3,
         fillColor,
         fillOpacity: 0.95,
-      }).addTo(state.map);
-      state.deviceMarkers.set(device.device_id, marker);
-    } else {
-      marker.setLatLng(latLng);
-      marker.setStyle({ fillColor });
-    }
+      },
+    });
+    state.deviceMarkers.set(device.device_id, marker);
     marker.bindPopup(escapeHtml(title));
   });
 
@@ -840,20 +890,18 @@ function updateMarkers(snapshot) {
     const latLng = getLatLng(peer);
     if (!latLng) return;
     seenPeers.add(peer.device_id);
-    let marker = state.peerMarkers.get(peer.device_id);
-    if (!marker) {
-      marker = L.circleMarker(latLng, {
+    const marker = updateRoverMarker(state.peerMarkers.get(peer.device_id), latLng, {
+      variant: "peer",
+      status: peer.stale ? "stale" : "live",
+      dotStyle: {
         radius: 7,
         color: "#191b1f",
         weight: 2,
         fillColor: peer.stale ? "#b7791f" : "#0f8b5f",
         fillOpacity: 0.86,
-      }).addTo(state.map);
-      state.peerMarkers.set(peer.device_id, marker);
-    } else {
-      marker.setLatLng(latLng);
-      marker.setStyle({ fillColor: peer.stale ? "#b7791f" : "#0f8b5f" });
-    }
+      },
+    });
+    state.peerMarkers.set(peer.device_id, marker);
     marker.bindPopup(escapeHtml(`${displayNameForPeer(peer)} - ${peer.fix_label || "UNKNOWN"}`));
   });
 

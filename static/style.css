@@ -660,6 +660,50 @@ summary {
   color: var(--ink);
 }
 
+.rover-image-marker {
+  background: transparent;
+  border: 0;
+}
+
+.rover-image-marker img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 3px rgba(25, 27, 31, 0.45));
+  pointer-events: none;
+}
+
+.rover-image-marker::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 1px 3px rgba(25, 27, 31, 0.35);
+  transform: translate(-50%, -50%);
+}
+
+.rover-image-marker.peer::after {
+  background: var(--green);
+}
+
+.rover-image-marker.stale::after {
+  background: var(--amber);
+}
+
+.rover-image-marker.offline {
+  opacity: 0.72;
+}
+
+.rover-image-marker.offline::after {
+  background: var(--muted);
+}
+
 @media (max-width: 900px) {
   .topbar {
     height: auto;
