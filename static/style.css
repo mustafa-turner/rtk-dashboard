@@ -684,12 +684,31 @@ summary {
 
   .dashboard-grid {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(420px, 58vh) minmax(0, 1fr);
+    grid-template-rows: auto minmax(220px, 32vh) auto auto;
+    overflow: auto;
+  }
+
+  .map-panel {
+    order: 2;
+    min-height: 220px;
   }
 
   .side-panel {
+    display: contents;
+  }
+
+  .safety-panel {
+    order: 1;
+  }
+
+  .summary-panel {
+    order: 3;
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+
+  .details-panel {
+    order: 4;
   }
 }
 
@@ -705,6 +724,23 @@ summary {
 
   .rover-tab {
     min-width: 122px;
+  }
+
+  .dashboard-grid {
+    grid-template-rows: auto minmax(180px, 28vh) auto auto;
+  }
+
+  .map-panel {
+    min-height: 180px;
+  }
+
+  .map-overlay {
+    inset: 10px 10px auto 10px;
+  }
+
+  .selected-label {
+    max-width: none;
+    min-width: 0;
   }
 
   .raw-name-row,

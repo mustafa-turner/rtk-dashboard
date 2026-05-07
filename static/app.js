@@ -4,7 +4,10 @@ const state = {
   map: null,
   deviceMarkers: new Map(),
   peerMarkers: new Map(),
+  eventStreamConnected: true,
 };
+
+const SAFETY_STALE_MS = 2000;
 
 const fixLabels = {
   0: "NO FIX",
@@ -49,6 +52,31 @@ function ageLabel(lastSeenMs, nowMs) {
   return `${Math.round(seconds / 60)}m`;
 }
 
+function snapshotNowMs(snapshot) {
+  const serverNowMs = Number(snapshot?.server?.now_ms);
+  const receivedAtMs = Number(snapshot?.client_received_at_ms);
+  if (!Number.isFinite(serverNowMs)) {
+    return Date.now();
+  }
+  if (!Number.isFinite(receivedAtMs)) {
+    return serverNowMs;
+  }
+  return serverNowMs + Math.max(0, Date.now() - receivedAtMs);
+}
+
+function roverAgeMs(rover, snapshot) {
+  const lastSeenMs = Number(rover?.lastSeenMs);
+  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) {
+    return null;
+  }
+  return Math.max(0, snapshotNowMs(snapshot) - lastSeenMs);
+}
+
+function roverIsStaleForSafety(rover, snapshot) {
+  const ageMs = roverAgeMs(rover, snapshot);
+  return ageMs !== null && ageMs > SAFETY_STALE_MS;
+}
+
 function statusClassForFix(fixMode) {
   if (fixMode === 4) return "good";
   if (fixMode === 3 || fixMode === 2) return "warn";
@@ -58,8 +86,8 @@ function statusClassForFix(fixMode) {
 function safeDistanceClass(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) return "unknown";
-  if (number < 5) return "bad";
-  if (number < 10) return "warn";
+  if (number < 25) return "bad";
+  // if (number < 25) return "warn";
   return "good";
 }
 
@@ -275,6 +303,7 @@ function firstDeviceLatLng() {
 
 function updateHeader(snapshot) {
   const dashboard = snapshot.server.dashboard || {};
+  const nowMs = snapshotNowMs(snapshot);
   byId("dashboard-title").textContent = dashboard.title || "Crane Rover Dashboard";
   byId("mqtt-address").textContent = `MQTT ${snapshot.server.mqtt.host}:${snapshot.server.mqtt.port}`;
   byId("device-count").textContent = `${Object.keys(snapshot.devices).length} rovers`;
@@ -288,7 +317,7 @@ function updateHeader(snapshot) {
     liveLabel.textContent = "Waiting";
     return;
   }
-  const ageMs = snapshot.server.now_ms - selected.last_seen_ms;
+  const ageMs = nowMs - selected.last_seen_ms;
   if (ageMs < 6000) {
     liveDot.classList.add("live");
     liveLabel.textContent = "Live";
@@ -300,26 +329,30 @@ function updateHeader(snapshot) {
 
 function roverSummaryFromDevice(device, role, snapshot) {
   const telemetry = device?.telemetry || {};
+  const nowMs = snapshotNowMs(snapshot);
   return {
     kind: "device",
     role,
     name: displayNameForDevice(device),
     id: device?.device_id || "",
+    lastSeenMs: device?.last_seen_ms || 0,
     telemetry,
     fix: telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN",
     accuracy: numeric(telemetry.local_accuracy_m, 3, " m"),
     source: device?.source_host || "",
-    age: device?.last_seen_ms ? ageLabel(device.last_seen_ms, snapshot.server.now_ms) : "",
+    age: device?.last_seen_ms ? ageLabel(device.last_seen_ms, nowMs) : "",
   };
 }
 
 function roverSummaryFromPeer(peer, role, snapshot, selectedTelemetry) {
   const accuracy = firstValue(peer, ["local_accuracy_m", "accuracy_m", "horizontal_accuracy_m"]);
+  const nowMs = snapshotNowMs(snapshot);
   return {
     kind: "peer",
     role,
     name: displayNameForPeer(peer),
     id: peer?.device_id || "",
+    lastSeenMs: peer?.last_seen_ms || 0,
     telemetry: peer || {},
     fix:
       peer?.fix_label ||
@@ -329,7 +362,7 @@ function roverSummaryFromPeer(peer, role, snapshot, selectedTelemetry) {
       "UNKNOWN",
     accuracy: numeric(accuracy ?? selectedTelemetry?.nearest_peer_accuracy_m, 3, " m"),
     source: peer?.source_host || "",
-    age: peer?.last_seen_ms ? ageLabel(peer.last_seen_ms, snapshot.server.now_ms) : "",
+    age: peer?.last_seen_ms ? ageLabel(peer.last_seen_ms, nowMs) : "",
   };
 }
 
@@ -339,6 +372,7 @@ function roverSummaryFromNearestTelemetry(peerId, telemetry, role) {
     role,
     name: String(peerId || "Waiting"),
     id: String(peerId || ""),
+    lastSeenMs: 0,
     telemetry: {},
     fix: fixLabels[telemetry?.nearest_peer_fix_mode] || "UNKNOWN",
     accuracy: numeric(telemetry?.nearest_peer_accuracy_m, 3, " m"),
@@ -353,6 +387,7 @@ function placeholderRoverSummary(role) {
     role,
     name: "Waiting",
     id: "",
+    lastSeenMs: 0,
     telemetry: {},
     fix: "UNKNOWN",
     accuracy: "-",
@@ -523,7 +558,8 @@ function renderSafetyRovers(rovers) {
 
 function updateSafety(device, snapshot, safetyRovers = buildSafetyRovers(device, snapshot)) {
   const telemetry = device?.telemetry || {};
-  const safeDistance = telemetry.nearest_peer_safe_distance_m;
+  const safetyIsStale = safetyRovers.slice(0, 2).some((rover) => roverIsStaleForSafety(rover, snapshot));
+  const safeDistance = safetyIsStale ? null : telemetry.nearest_peer_safe_distance_m;
   const stateClass = safeDistanceClass(safeDistance);
   const roverOne = safetyRovers[0]?.name || "-";
   const roverTwo = safetyRovers[1]?.name || telemetry.nearest_peer_id || "-";
@@ -533,10 +569,14 @@ function updateSafety(device, snapshot, safetyRovers = buildSafetyRovers(device,
   byId("safety-value").textContent = safeDistanceValue(safeDistance);
   byId("safety-pair").textContent = device ? `${roverOne} to ${roverTwo}` : "No crane pair";
   renderSafetyRovers(safetyRovers);
-  byId("safety-raw").textContent = numeric(telemetry.nearest_peer_distance_m, 2, " m");
-  byId("safety-uncertainty").textContent = numeric(telemetry.nearest_peer_uncertainty_m, 3, " m");
-  byId("safety-local-accuracy").textContent = numeric(telemetry.local_accuracy_m, 3, " m");
-  byId("safety-peer-accuracy").textContent = numeric(telemetry.nearest_peer_accuracy_m, 3, " m");
+  byId("safety-raw").textContent = safetyIsStale ? "-" : numeric(telemetry.nearest_peer_distance_m, 2, " m");
+  byId("safety-uncertainty").textContent = safetyIsStale
+    ? "-"
+    : numeric(telemetry.nearest_peer_uncertainty_m, 3, " m");
+  byId("safety-local-accuracy").textContent = safetyIsStale ? "-" : numeric(telemetry.local_accuracy_m, 3, " m");
+  byId("safety-peer-accuracy").textContent = safetyIsStale
+    ? "-"
+    : numeric(telemetry.nearest_peer_accuracy_m, 3, " m");
 }
 
 function selectHeaderRover(deviceId) {
@@ -730,6 +770,9 @@ function formatRawValue(value) {
 }
 
 function render(snapshot) {
+  if (!snapshot.client_received_at_ms) {
+    snapshot.client_received_at_ms = Date.now();
+  }
   state.data = snapshot;
   ensureSelectedDevice(snapshot);
   const selected = selectedDevice();
@@ -742,6 +785,19 @@ function render(snapshot) {
   updateMarkers(snapshot);
   updateSelectedLabel(selected);
   renderRawPayloads(payloadRovers);
+}
+
+function refreshAgeSensitiveUi() {
+  const snapshot = state.data;
+  if (!snapshot) return;
+
+  const selected = selectedDevice();
+  const safetyRovers = buildSafetyRovers(selected, snapshot);
+  if (state.eventStreamConnected) {
+    updateHeader(snapshot);
+  }
+  updateSafety(selected, snapshot, safetyRovers);
+  renderTelemetryCompare(safetyRovers);
 }
 
 function escapeHtml(value) {
@@ -761,12 +817,15 @@ async function boot() {
 
   const events = new EventSource("/events");
   events.addEventListener("state", (event) => {
+    state.eventStreamConnected = true;
     render(JSON.parse(event.data));
   });
   events.onerror = () => {
+    state.eventStreamConnected = false;
     byId("live-label").textContent = "Reconnecting";
     byId("live-dot").className = "status-dot offline";
   };
+  setInterval(refreshAgeSensitiveUi, 500);
 }
 
 boot().catch((error) => {
