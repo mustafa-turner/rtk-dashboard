@@ -665,6 +665,12 @@ summary {
   border: 0;
 }
 
+.rover-image-marker-body {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
 .rover-image-marker img {
   display: block;
   width: 100%;
@@ -673,15 +679,14 @@ summary {
   filter: drop-shadow(0 2px 3px rgba(25, 27, 31, 0.45));
   pointer-events: none;
 
-  transform: rotate(27deg);
+  transform: rotate(var(--rover-icon-rotation, 27deg));
   transform-origin: 50% 50%;
 }
 
-.rover-image-marker::after {
-  content: "";
+.rover-image-marker-dot {
   position: absolute;
-  left: 50%;
-  top: 50%;
+  left: calc(50% + var(--rover-antenna-x, 0px));
+  top: calc(50% + var(--rover-antenna-y, 0px));
   width: 10px;
   height: 10px;
   border: 2px solid #ffffff;
@@ -689,13 +694,14 @@ summary {
   background: var(--cyan);
   box-shadow: 0 1px 3px rgba(25, 27, 31, 0.35);
   transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
-.rover-image-marker.peer::after {
+.rover-image-marker.peer .rover-image-marker-dot {
   background: var(--green);
 }
 
-.rover-image-marker.stale::after {
+.rover-image-marker.stale .rover-image-marker-dot {
   background: var(--amber);
 }
 
@@ -703,7 +709,7 @@ summary {
   opacity: 0.72;
 }
 
-.rover-image-marker.offline::after {
+.rover-image-marker.offline .rover-image-marker-dot {
   background: var(--muted);
 }
 

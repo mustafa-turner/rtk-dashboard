@@ -14,6 +14,11 @@ udpPeers:
 
 dashboard:
   title: Crane Rover Dashboard
+  roverAntennaOffset:
+    # Offset from the icon center to the GNSS antenna, in source-image pixels.
+    # Positive x moves right on the icon, positive y moves down on the icon.
+    x: 0
+    y: 0
   roverNames:
     # Match against device_id, MQTT client ID, username, or source IP.
     # 192.168.1.21: rover-alpha

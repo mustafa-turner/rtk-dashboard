@@ -12,6 +12,9 @@ const ROVER_DISCONNECTED_MS = 5000;
 const ROVER_ICON_HIDE_ZOOM = 14;
 const ROVER_ICON_BASE_ZOOM = 16;
 const ROVER_ICON_URL = "/icons/CC.png";
+const ROVER_ICON_ROTATION_DEG = 27;
+const ROVER_ICON_SOURCE_WIDTH = 124;
+const ROVER_ICON_SOURCE_HEIGHT = 435;
 const ROVER_ICON_BASE_WIDTH = 10;
 const ROVER_ICON_MIN_WIDTH = 5;
 const ROVER_ICON_MAX_WIDTH = 999;
@@ -304,16 +307,56 @@ function roverIconSizeForZoom() {
   return { width, height };
 }
 
+function roverAntennaOffsetConfig() {
+  const configured = state.data?.server?.dashboard?.roverAntennaOffset || {};
+  const x = Number(configured.x);
+  const y = Number(configured.y);
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+  };
+}
+
+function rotateScreenOffset(x, y, degrees) {
+  const radians = (degrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: x * cos - y * sin,
+    y: x * sin + y * cos,
+  };
+}
+
+function roverAntennaOffsetForSize(size) {
+  const configured = roverAntennaOffsetConfig();
+  const scaled = {
+    x: (configured.x * size.width) / ROVER_ICON_SOURCE_WIDTH,
+    y: (configured.y * size.height) / ROVER_ICON_SOURCE_HEIGHT,
+  };
+  return rotateScreenOffset(scaled.x, scaled.y, ROVER_ICON_ROTATION_DEG);
+}
+
 function roverIconForMarker({ variant, status }) {
   const size = roverIconSizeForZoom();
   if (!size) return null;
+  const antennaOffset = roverAntennaOffsetForSize(size);
+  const anchorX = size.width / 2 + antennaOffset.x;
+  const anchorY = size.height / 2 + antennaOffset.y;
 
   return L.divIcon({
     className: `rover-image-marker ${variant} ${status}`,
-    html: `<img src="${ROVER_ICON_URL}" alt="">`,
+    html: `
+      <div
+        class="rover-image-marker-body"
+        style="--rover-icon-rotation: ${ROVER_ICON_ROTATION_DEG}deg; --rover-antenna-x: ${antennaOffset.x}px; --rover-antenna-y: ${antennaOffset.y}px;"
+      >
+        <img src="${ROVER_ICON_URL}" alt="">
+        <span class="rover-image-marker-dot" aria-hidden="true"></span>
+      </div>
+    `,
     iconSize: [size.width, size.height],
-    iconAnchor: [size.width / 2, size.height / 2],
-    popupAnchor: [0, -size.height / 2],
+    iconAnchor: [anchorX, anchorY],
+    popupAnchor: [0, -anchorY],
   });
 }
 

@@ -125,6 +125,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "dashboard": {
             "title": "Crane Rover Dashboard",
             "defaultCenter": {"latitude": -2.5489, "longitude": 118.0149, "zoom": 5},
+            "roverAntennaOffset": {"x": 0, "y": 0},
         },
     }
 

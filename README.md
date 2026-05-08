@@ -176,12 +176,19 @@ in `config.yaml`:
 
 ```yaml
 dashboard:
+  roverAntennaOffset:
+    x: 0
+    y: 0
   roverNames:
     192.168.1.21: rover-alpha
     sample-rover: sample-rover
 ```
 
 Keys can match `device_id`, MQTT client ID, username, or source IP.
+
+`roverAntennaOffset` is measured in the original `CC.png` image pixels. `x`
+and `y` are relative to the icon itself, and the dashboard rotates that offset
+with the icon before placing it on the map.
 
 ## Test With Sample Data
 
