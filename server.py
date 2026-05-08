@@ -298,6 +298,7 @@ class DeviceRecord:
     display_name: str = ""
     telemetry: dict[str, Any] = field(default_factory=dict)
     last_seen_ms: int = 0
+    last_telemetry_seen_ms: int = 0
     last_position_seen_ms: int = 0
     mqtt_client_id: str = ""
     source_host: str = ""
@@ -310,6 +311,7 @@ class DeviceRecord:
             "display_name": self.display_name or self.device_id,
             "telemetry": self.telemetry,
             "last_seen_ms": self.last_seen_ms,
+            "last_telemetry_seen_ms": self.last_telemetry_seen_ms,
             "last_position_seen_ms": self.last_position_seen_ms,
             "mqtt_client_id": self.mqtt_client_id,
             "source_host": self.source_host,
@@ -405,6 +407,7 @@ class DashboardState:
             or self.configured_rover_name(device_id, client_id, username, source_host)
         )
 
+        seen_ms = now_ms()
         with self._condition:
             record = self._devices.get(device_id)
             if record is None:
@@ -418,14 +421,15 @@ class DashboardState:
             else:
                 normalize_position(payload)
                 if has_valid_position(payload):
-                    record.last_position_seen_ms = now_ms()
+                    record.last_position_seen_ms = seen_ms
+                record.last_telemetry_seen_ms = seen_ms
                 record.telemetry.update(payload)
                 record.telemetry["fix_mode_label"] = FIX_MODE_LABELS.get(record.telemetry.get("fix_mode"), "UNKNOWN")
                 record.telemetry["ntrip_status_label"] = NTRIP_STATUS_LABELS.get(
                     record.telemetry.get("ntrip_status"), "UNKNOWN"
                 )
 
-            record.last_seen_ms = now_ms()
+            record.last_seen_ms = seen_ms
             record.mqtt_client_id = client_id
             record.source_host = source_host
             record.username = username

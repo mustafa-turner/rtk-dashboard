@@ -8,7 +8,7 @@ const state = {
   eventStreamConnected: true,
 };
 
-const ROVER_DISCONNECTED_MS = 2000;
+const ROVER_DISCONNECTED_MS = 5000;
 const ROVER_ICON_HIDE_ZOOM = 14;
 const ROVER_ICON_BASE_ZOOM = 16;
 const ROVER_ICON_URL = "/icons/CC.png";
@@ -62,14 +62,10 @@ function ageLabel(lastSeenMs, nowMs) {
 
 function snapshotNowMs(snapshot) {
   const serverNowMs = Number(snapshot?.server?.now_ms);
-  const receivedAtMs = Number(snapshot?.client_received_at_ms);
   if (!Number.isFinite(serverNowMs)) {
     return Date.now();
   }
-  if (!Number.isFinite(receivedAtMs)) {
-    return serverNowMs;
-  }
-  return serverNowMs + Math.max(0, Date.now() - receivedAtMs);
+  return serverNowMs;
 }
 
 function ageMsFromLastSeen(lastSeenMs, snapshot) {
@@ -78,6 +74,15 @@ function ageMsFromLastSeen(lastSeenMs, snapshot) {
     return null;
   }
   return Math.max(0, snapshotNowMs(snapshot) - lastSeenMs);
+}
+
+function deviceTelemetrySeenMs(device) {
+  return (
+    Number(device?.last_telemetry_seen_ms) ||
+    Number(device?.last_position_seen_ms) ||
+    Number(device?.last_seen_ms) ||
+    0
+  );
 }
 
 function roverAgeMs(rover, snapshot) {
@@ -542,18 +547,19 @@ function updateHeader(snapshot) {
 function roverSummaryFromDevice(device, role, snapshot) {
   const telemetry = device?.telemetry || {};
   const nowMs = snapshotNowMs(snapshot);
+  const telemetrySeenMs = deviceTelemetrySeenMs(device);
   return {
     kind: "device",
     role,
     name: displayNameForDevice(device),
     id: device?.device_id || "",
-    lastSeenMs: device?.last_seen_ms || 0,
+    lastSeenMs: telemetrySeenMs,
     lastPositionSeenMs: device?.last_position_seen_ms || 0,
     telemetry,
     fix: telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN",
     accuracy: numeric(telemetry.local_accuracy_m, 3, " m"),
     source: device?.source_host || "",
-    age: device?.last_seen_ms ? ageLabel(device.last_seen_ms, nowMs) : "",
+    age: telemetrySeenMs ? ageLabel(telemetrySeenMs, nowMs) : "",
   };
 }
 
@@ -990,9 +996,6 @@ function formatRawValue(value) {
 }
 
 function render(snapshot) {
-  if (!snapshot.client_received_at_ms) {
-    snapshot.client_received_at_ms = Date.now();
-  }
   state.data = snapshot;
   ensureSelectedDevice(snapshot);
   const selected = selectedDevice();
