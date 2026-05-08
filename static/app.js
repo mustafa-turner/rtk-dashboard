@@ -5,7 +5,9 @@ const state = {
   tilesetBounds: null,
   deviceMarkers: new Map(),
   peerMarkers: new Map(),
-  eventStreamConnected: true,
+  eventStreamConnected: false,
+  lastVersion: -1,
+  stateFetchInFlight: false,
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -69,6 +71,11 @@ function snapshotNowMs(snapshot) {
     return Date.now();
   }
   return serverNowMs;
+}
+
+function snapshotVersion(snapshot) {
+  const version = Number(snapshot?.version);
+  return Number.isFinite(version) ? version : -1;
 }
 
 function ageMsFromLastSeen(lastSeenMs, snapshot) {
@@ -1039,6 +1046,7 @@ function formatRawValue(value) {
 }
 
 function render(snapshot) {
+  state.lastVersion = Math.max(state.lastVersion, snapshotVersion(snapshot));
   state.data = snapshot;
   ensureSelectedDevice(snapshot);
   const selected = selectedDevice();
@@ -1068,6 +1076,21 @@ function refreshAgeSensitiveUi() {
   updateMarkers(snapshot);
 }
 
+async function fetchLatestState(newerOnly = false) {
+  if (state.stateFetchInFlight) return null;
+  state.stateFetchInFlight = true;
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    const snapshot = await response.json();
+    if (!newerOnly || snapshotVersion(snapshot) > state.lastVersion) {
+      render(snapshot);
+    }
+    return snapshot;
+  } finally {
+    state.stateFetchInFlight = false;
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -1078,12 +1101,13 @@ function escapeHtml(value) {
 }
 
 async function boot() {
-  const response = await fetch("/api/state");
-  const snapshot = await response.json();
+  const snapshot = await fetchLatestState();
   initMap(snapshot.server);
-  render(snapshot);
 
   const events = new EventSource("/events");
+  events.onopen = () => {
+    state.eventStreamConnected = true;
+  };
   events.addEventListener("state", (event) => {
     state.eventStreamConnected = true;
     render(JSON.parse(event.data));
@@ -1094,6 +1118,11 @@ async function boot() {
     byId("live-dot").className = "status-dot offline";
   };
   setInterval(refreshAgeSensitiveUi, 500);
+  setInterval(() => {
+    fetchLatestState(true).catch((error) => {
+      console.error("State refresh failed", error);
+    });
+  }, 1000);
 }
 
 boot().catch((error) => {
