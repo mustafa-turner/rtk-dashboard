@@ -490,11 +490,13 @@ class DashboardState:
                 "events": list(self._events),
             }
 
-    def wait_for_update(self, version: int, timeout: float = 25.0) -> dict[str, Any]:
+    def wait_for_update(self, version: int, timeout: float = 25.0) -> tuple[bool, dict[str, Any]]:
         with self._condition:
             if self._version <= version:
                 self._condition.wait(timeout)
-            return self.snapshot()
+            snapshot = self.snapshot()
+            changed = int(snapshot["version"]) > version
+            return changed, snapshot
 
 
 @dataclass
@@ -764,7 +766,12 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
         version = -1
         try:
             while True:
-                snapshot = self.dashboard_state.wait_for_update(version)
+                changed, snapshot = self.dashboard_state.wait_for_update(version)
+                if not changed:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+
                 version = int(snapshot["version"])
                 encoded = json.dumps(snapshot, separators=(",", ":"))
                 self.wfile.write(f"event: state\ndata: {encoded}\n\n".encode("utf-8"))

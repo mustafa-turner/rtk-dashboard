@@ -8,6 +8,7 @@ const state = {
   eventStreamConnected: false,
   lastVersion: -1,
   stateFetchInFlight: false,
+  fallbackPollMs: 5000,
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -1107,6 +1108,9 @@ async function boot() {
   const events = new EventSource("/events");
   events.onopen = () => {
     state.eventStreamConnected = true;
+    fetchLatestState(true).catch((error) => {
+      console.error("State refresh after SSE reconnect failed", error);
+    });
   };
   events.addEventListener("state", (event) => {
     state.eventStreamConnected = true;
@@ -1119,10 +1123,11 @@ async function boot() {
   };
   setInterval(refreshAgeSensitiveUi, 500);
   setInterval(() => {
+    if (state.eventStreamConnected) return;
     fetchLatestState(true).catch((error) => {
       console.error("State refresh failed", error);
     });
-  }, 1000);
+  }, state.fallbackPollMs);
 }
 
 boot().catch((error) => {
