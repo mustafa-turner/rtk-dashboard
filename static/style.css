@@ -717,7 +717,6 @@ summary {
   gap: 8px;
 }
 
-.logging-controls select,
 .logging-controls button {
   height: 36px;
   border: 1px solid var(--line);
@@ -730,6 +729,33 @@ summary {
 .logging-controls button {
   cursor: pointer;
   font-weight: 800;
+}
+
+.log-range-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f3f5f7;
+}
+
+.log-range-tab {
+  min-width: 78px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.log-range-tab.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 1px 4px rgba(25, 27, 31, 0.12);
 }
 
 .log-metric-grid {
@@ -815,17 +841,16 @@ summary {
   stroke-linejoin: round;
 }
 
-.chart-point {
-  fill: var(--panel);
+.chart-hover-line {
   stroke: var(--chart-color);
-  stroke-width: 3;
-  cursor: crosshair;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+  opacity: 0.62;
 }
 
-.chart-point:hover,
-.chart-point:focus {
-  fill: var(--chart-color);
-  outline: 0;
+.chart-hit-area {
+  fill: transparent;
+  cursor: crosshair;
 }
 
 .chart-tooltip {

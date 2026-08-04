@@ -12,7 +12,7 @@ const state = {
   currentView: "live",
   logs: null,
   logsFetchInFlight: false,
-  logChartMode: "hourly",
+  logRange: "24h",
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -902,6 +902,9 @@ function selectHeaderRover(deviceId) {
 
   state.selectedId = deviceId;
   render(snapshot);
+  if (state.currentView === "logging") {
+    refreshLogs().catch((error) => console.error("Log refresh failed", error));
+  }
 
   const latLng = getLatLng(device.telemetry || {});
   if (latLng && state.map) state.map.setView(latLng, Math.max(state.map.getZoom(), 16));
@@ -1103,7 +1106,7 @@ function setActiveView(view) {
 }
 
 function logRangeMs() {
-  return parseRangeToMs(byId("log-range")?.value || "24h");
+  return parseRangeToMs(state.logRange === "live" ? "10m" : state.logRange);
 }
 
 function parseRangeToMs(value) {
@@ -1112,22 +1115,20 @@ function parseRangeToMs(value) {
   if (!Number.isFinite(amount) || amount <= 0) return 24 * 60 * 60 * 1000;
   if (text.endsWith("d")) return amount * 24 * 60 * 60 * 1000;
   if (text.endsWith("w")) return amount * 7 * 24 * 60 * 60 * 1000;
+  if (text.endsWith("m")) return amount * 60 * 1000;
   return amount * 60 * 60 * 1000;
 }
 
-function updateLogDeviceOptions(snapshot) {
-  const select = byId("log-device");
-  if (!select) return;
-  const previous = select.value;
-  const devices = sortedDevices(snapshot);
-  select.innerHTML = `<option value="">All devices</option>`;
-  devices.forEach((device) => {
-    const option = document.createElement("option");
-    option.value = device.device_id;
-    option.textContent = displayNameForDevice(device);
-    select.append(option);
+function selectedLogDeviceId() {
+  return selectedDevice()?.device_id || "";
+}
+
+function updateLogRangeTabs() {
+  document.querySelectorAll(".log-range-tab").forEach((button) => {
+    const active = button.dataset.range === state.logRange;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   });
-  select.value = devices.some((device) => device.device_id === previous) ? previous : "";
 }
 
 async function fetchJson(url) {
@@ -1141,22 +1142,23 @@ async function fetchJson(url) {
 async function refreshLogs() {
   if (state.logsFetchInFlight) return;
   state.logsFetchInFlight = true;
-  const range = byId("log-range")?.value || "24h";
+  const range = state.logRange === "live" ? "10m" : state.logRange;
   const rangeMs = logRangeMs();
   const to = Date.now();
   const from = to - rangeMs;
-  const deviceId = byId("log-device")?.value || "";
+  const deviceId = selectedLogDeviceId();
   const params = new URLSearchParams({ range, from: String(from), to: String(to) });
   if (deviceId) params.set("device_id", deviceId);
-  const sampleParams = new URLSearchParams({ from: String(to - 10 * 60 * 1000), to: String(to), limit: "500" });
+  const eventParams = new URLSearchParams({ range, from: String(from), to: String(to), limit: "80" });
+  const sampleParams = new URLSearchParams({ from: String(from), to: String(to), limit: "500" });
   if (deviceId) sampleParams.set("device_id", deviceId);
   try {
     const requests = [
       fetchJson(`/api/logs/summary?${params.toString()}`),
       fetchJson(`/api/logs/hourly?${params.toString()}`),
-      fetchJson(`/api/logs/events?${params.toString()}&limit=80`),
+      fetchJson(`/api/logs/events?${eventParams.toString()}`),
     ];
-    if (state.logChartMode === "live") {
+    if (state.logRange === "live") {
       requests.push(fetchJson(`/api/logs/samples?${sampleParams.toString()}`));
     }
     const [summary, hourly, events, samples] = await Promise.all(requests);
@@ -1282,20 +1284,6 @@ function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490"
   }
   const path = linePath(points, width, height, padding, minValue, maxValue);
   const fillPath = `${path} L ${points[points.length - 1].x.toFixed(2)} ${height - padding.bottom} L ${points[0].x.toFixed(2)} ${height - padding.bottom} Z`;
-  const pointDots = points
-    .map(
-      (point, index) => `
-        <circle
-          class="chart-point"
-          cx="${point.x.toFixed(2)}"
-          cy="${point.y.toFixed(2)}"
-          r="8"
-          data-index="${index}"
-          tabindex="0"
-        ></circle>
-      `
-    )
-    .join("");
 
   el.innerHTML = `
     <svg class="line-chart-svg" viewBox="0 0 ${width} ${height}" role="img" style="--chart-color: ${color}">
@@ -1303,33 +1291,42 @@ function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490"
       <line class="chart-grid-line" x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}"></line>
       <path class="chart-area" d="${fillPath}"></path>
       <path class="chart-line" d="${path}"></path>
-      ${pointDots}
+      <line class="chart-hover-line" x1="0" y1="${padding.top}" x2="0" y2="${height - padding.bottom}" hidden></line>
+      <rect class="chart-hit-area" x="${padding.left}" y="${padding.top}" width="${width - padding.left - padding.right}" height="${height - padding.top - padding.bottom}"></rect>
     </svg>
     <div class="chart-tooltip" hidden></div>
   `;
 
+  const svg = el.querySelector(".line-chart-svg");
   const tooltip = el.querySelector(".chart-tooltip");
+  const hoverLine = el.querySelector(".chart-hover-line");
+  const nearestPoint = (x) =>
+    points.reduce((best, point) => (Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best), points[0]);
   const showTooltip = (point) => {
     tooltip.hidden = false;
+    hoverLine.hidden = false;
     tooltip.innerHTML = `
       <strong>${escapeHtml(Number(point.value).toFixed(digits) + suffix)}</strong>
       <span>${escapeHtml(timeLabel(point.time))}</span>
     `;
     tooltip.style.left = `${(point.x / width) * 100}%`;
     tooltip.style.top = `${(point.y / height) * 100}%`;
+    hoverLine.setAttribute("x1", point.x.toFixed(2));
+    hoverLine.setAttribute("x2", point.x.toFixed(2));
   };
-  el.querySelectorAll(".chart-point").forEach((dot) => {
-    const point = points[Number(dot.dataset.index)];
-    dot.addEventListener("mouseenter", () => showTooltip(point));
-    dot.addEventListener("focus", () => showTooltip(point));
+  svg.addEventListener("mousemove", (event) => {
+    const rect = svg.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * width;
+    showTooltip(nearestPoint(Math.max(padding.left, Math.min(width - padding.right, x))));
   });
   el.addEventListener("mouseleave", () => {
     tooltip.hidden = true;
+    hoverLine.hidden = true;
   });
 }
 
 function renderLogCharts(hourly) {
-  if (state.logChartMode === "live") {
+  if (state.logRange === "live") {
     renderLiveSampleCharts(state.logs?.samples);
     return;
   }
@@ -1440,7 +1437,6 @@ function render(snapshot) {
   updateSafety(selected, snapshot, safetyRovers);
   renderTelemetryCompare(safetyRovers);
   renderHeaderRovers(snapshot);
-  updateLogDeviceOptions(snapshot);
   updateMarkers(snapshot);
   updateSelectedLabel(selected);
   renderRawPayloads(payloadRovers);
@@ -1492,12 +1488,14 @@ async function boot() {
   document.querySelectorAll(".view-tab").forEach((button) => {
     button.addEventListener("click", () => setActiveView(button.dataset.view || "live"));
   });
-  byId("log-range").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
-  byId("log-device").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
   byId("refresh-logs").addEventListener("click", () => refreshLogs().catch((error) => console.error(error)));
-  byId("log-chart-mode").addEventListener("change", (event) => {
-    state.logChartMode = event.target.value === "live" ? "live" : "hourly";
-    refreshLogs().catch((error) => console.error(error));
+  updateLogRangeTabs();
+  document.querySelectorAll(".log-range-tab").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.logRange = button.dataset.range || "24h";
+      updateLogRangeTabs();
+      refreshLogs().catch((error) => console.error(error));
+    });
   });
 
   const events = new EventSource("/events");

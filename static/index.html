@@ -97,18 +97,12 @@
             <h2>Operational History</h2>
           </div>
           <div class="logging-controls">
-            <select id="log-range" aria-label="Log range">
-              <option value="24h">24 hours</option>
-              <option value="7d">7 days</option>
-              <option value="30d">30 days</option>
-            </select>
-            <select id="log-device" aria-label="Log device">
-              <option value="">All devices</option>
-            </select>
-            <select id="log-chart-mode" aria-label="Chart mode">
-              <option value="hourly">Hourly trends</option>
-              <option value="live">Live data</option>
-            </select>
+            <div class="log-range-tabs" aria-label="Log range">
+              <button type="button" class="log-range-tab" data-range="30d">30 days</button>
+              <button type="button" class="log-range-tab" data-range="7d">7 days</button>
+              <button type="button" class="log-range-tab active" data-range="24h">24 hours</button>
+              <button type="button" class="log-range-tab" data-range="live">Live</button>
+            </div>
             <button type="button" id="refresh-logs">Refresh</button>
           </div>
         </section>

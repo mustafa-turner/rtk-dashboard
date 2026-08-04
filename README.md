@@ -176,9 +176,10 @@ The Logging tab reads these local API endpoints:
 - `/api/logs/events?from=...&to=...&device_id=...`
 - `/api/logs/samples?from=...&to=...&device_id=...&limit=500`
 
-While the Logging tab is open, it refreshes automatically. Switch the chart
-mode from `Hourly trends` to `Live data` to plot recent raw samples at the
-device publish cadence. The charts show time and value details on hover.
+While the Logging tab is open, it refreshes automatically. Use the top rover
+buttons to choose which crane to plot, then switch between `30 days`, `7 days`,
+`24 hours`, and `Live`. The live chart plots recent raw samples at the device
+publish cadence. Moving across a chart shows the nearest timestamp and value.
 
 The raw sample table stores the full JSON payload, so future devices such as
 tide sensors or truck trackers can be logged before the dashboard gets
