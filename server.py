@@ -904,6 +904,9 @@ class TelemetryLogger:
             filters += " and h.device_id = ?"
             params.append(device_id)
         with self._lock:
+            connection_percentages = self._connection_percentages(start_ms, end_ms, device_id)
+            connection_values = [value for value in connection_percentages.values() if value is not None]
+            connection_percent = sum(connection_values) / len(connection_values) if connection_values else None
             row = self.con.execute(
                 f"""
                 select
@@ -963,6 +966,7 @@ class TelemetryLogger:
             "reset_count": int(row["reset_count"] or 0),
             "uptime_max_sec": row["uptime_max_sec"],
             "last_sample_ms": last_sample,
+            "connection_percent": connection_percent,
             "closest": dict(closest) if closest is not None else None,
         }
 
@@ -984,6 +988,49 @@ class TelemetryLogger:
                 """,
                 params,
             ).fetchall()
+            device_metric_rows = [dict(row) for row in device_rows]
+            connection_percentages = self._connection_percentages(from_ms, to_ms, device_id)
+            existing_keys = {(int(row["hour_ms"]), str(row["device_id"])) for row in device_metric_rows}
+            for row in device_metric_rows:
+                row["connection_percent"] = connection_percentages.get((int(row["hour_ms"]), str(row["device_id"])))
+
+            device_infos = self.con.execute(
+                """
+                select device_id, display_name, device_type from devices
+                where (? = '' or device_id = ?)
+                """,
+                (device_id, device_id),
+            ).fetchall()
+            device_info_by_id = {str(row["device_id"]): dict(row) for row in device_infos}
+            for (hour_ms, connected_device_id), connection_percent in connection_percentages.items():
+                if (hour_ms, connected_device_id) in existing_keys:
+                    continue
+                info = device_info_by_id.get(connected_device_id, {"device_id": connected_device_id})
+                device_metric_rows.append(
+                    {
+                        "hour_ms": hour_ms,
+                        "device_id": connected_device_id,
+                        "display_name": info.get("display_name") or connected_device_id,
+                        "device_type": info.get("device_type") or "device",
+                        "sample_count": 0,
+                        "fix_fixed_count": 0,
+                        "fix_float_count": 0,
+                        "fix_no_count": 0,
+                        "ntrip_connected_count": 0,
+                        "ntrip_disconnected_count": 0,
+                        "accuracy_min_m": None,
+                        "accuracy_avg_m": None,
+                        "accuracy_max_m": None,
+                        "battery_min_percent": None,
+                        "battery_avg_percent": None,
+                        "battery_max_percent": None,
+                        "uptime_max_sec": None,
+                        "reset_count": 0,
+                        "updated_ms": now_ms(),
+                        "connection_percent": connection_percent,
+                    }
+                )
+            device_metric_rows.sort(key=lambda row: (int(row["hour_ms"]), str(row.get("display_name") or row["device_id"])))
             pair_rows = self.con.execute(
                 f"""
                 select * from hourly_pair_metrics
@@ -996,9 +1043,117 @@ class TelemetryLogger:
             "enabled": True,
             "from_ms": from_ms,
             "to_ms": to_ms,
-            "device_metrics": [dict(row) for row in device_rows],
+            "device_metrics": device_metric_rows,
             "pair_metrics": [dict(row) for row in pair_rows],
         }
+
+    def _connection_percentages(self, from_ms: int, to_ms: int, device_id: str = "") -> dict[tuple[int, str], float]:
+        if not self.enabled or self.con is None or to_ms <= from_ms:
+            return {}
+
+        start_hour_ms = (from_ms // 3600000) * 3600000
+        device_rows = self.con.execute(
+            """
+            select device_id from devices
+            where (? = '' or device_id = ?)
+            """,
+            (device_id, device_id),
+        ).fetchall()
+        device_ids = [str(row["device_id"]) for row in device_rows]
+        if not device_ids:
+            return {}
+
+        device_filter = ""
+        params: list[Any] = [start_hour_ms, to_ms]
+        event_params: list[Any] = [to_ms]
+        if device_id:
+            device_filter = " and device_id = ?"
+            params.append(device_id)
+            event_params.append(device_id)
+
+        sample_rows = self.con.execute(
+            f"""
+            select (at_ms / 3600000) * 3600000 as hour_ms, device_id, count(*) as sample_count
+            from telemetry_samples
+            where at_ms >= ? and at_ms <= ?{device_filter}
+            group by hour_ms, device_id
+            """,
+            params,
+        ).fetchall()
+        sample_counts = {(int(row["hour_ms"]), str(row["device_id"])): int(row["sample_count"]) for row in sample_rows}
+
+        event_rows = self.con.execute(
+            f"""
+            select at_ms, device_id, event_type
+            from system_events
+            where at_ms <= ?
+              and event_type in ('device_disconnected', 'device_reconnected')
+              {device_filter}
+            order by device_id collate nocase, at_ms asc
+            """,
+            event_params,
+        ).fetchall()
+        events_by_device: dict[str, list[dict[str, Any]]] = {}
+        for row in event_rows:
+            events_by_device.setdefault(str(row["device_id"]), []).append(dict(row))
+
+        percentages: dict[tuple[int, str], float] = {}
+        for connected_device_id in device_ids:
+            device_events = events_by_device.get(connected_device_id, [])
+            event_index = 0
+            connected_state: bool | None = None
+            for event in device_events:
+                if int(event["at_ms"]) >= start_hour_ms:
+                    break
+                connected_state = event["event_type"] == "device_reconnected"
+                event_index += 1
+
+            hour_ms = start_hour_ms
+            while hour_ms <= to_ms:
+                hour_start = max(hour_ms, from_ms)
+                hour_end = min(hour_ms + 3600000, to_ms)
+                if hour_end <= hour_start:
+                    hour_ms += 3600000
+                    continue
+
+                hour_events = []
+                while event_index < len(device_events) and int(device_events[event_index]["at_ms"]) < hour_end:
+                    event = device_events[event_index]
+                    if int(event["at_ms"]) >= hour_start:
+                        hour_events.append(event)
+                    else:
+                        connected_state = event["event_type"] == "device_reconnected"
+                    event_index += 1
+
+                sample_count = sample_counts.get((hour_ms, connected_device_id), 0)
+                if connected_state is None and sample_count > 0:
+                    connected_state = True
+                elif connected_state is None and not hour_events:
+                    hour_ms += 3600000
+                    continue
+                elif connected_state is None:
+                    connected_state = True
+
+                connected_ms = 0
+                cursor_ms = hour_start
+                state_for_hour = connected_state
+                for event in hour_events:
+                    event_ms = max(hour_start, min(hour_end, int(event["at_ms"])))
+                    if state_for_hour:
+                        connected_ms += max(0, event_ms - cursor_ms)
+                    state_for_hour = event["event_type"] == "device_reconnected"
+                    cursor_ms = event_ms
+                if state_for_hour:
+                    connected_ms += max(0, hour_end - cursor_ms)
+                connected_state = state_for_hour
+
+                if not hour_events and sample_count > 0 and connected_ms == 0:
+                    connected_ms = hour_end - hour_start
+
+                percentages[(hour_ms, connected_device_id)] = (connected_ms / max(1, hour_end - hour_start)) * 100
+                hour_ms += 3600000
+
+        return percentages
 
     def events(self, from_ms: int, to_ms: int, device_id: str = "", limit: int = 200) -> dict[str, Any]:
         if not self.enabled or self.con is None:

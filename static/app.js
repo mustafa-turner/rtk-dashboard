@@ -1200,8 +1200,6 @@ function renderLogMetrics(summary) {
     (Number(summary?.fix_fixed_count) || 0) +
     (Number(summary?.fix_float_count) || 0) +
     (Number(summary?.fix_no_count) || 0);
-  const ntripTotal =
-    (Number(summary?.ntrip_connected_count) || 0) + (Number(summary?.ntrip_disconnected_count) || 0);
   const closest = summary?.closest;
   const closestValue = closest?.closest_safe_distance_m ?? closest?.closest_raw_distance_m;
 
@@ -1209,7 +1207,7 @@ function renderLogMetrics(summary) {
     metricCard("Samples", sampleCount.toLocaleString(), `Last ${dateTimeLabel(summary?.last_sample_ms)}`),
     metricCard("Closest Distance", numeric(closestValue, 2, " m"), closest ? dateTimeLabel(closest.closest_at_ms) : "-"),
     metricCard("RTK Fixed", percent(summary?.fix_fixed_count, fixTotal), `${summary?.fix_fixed_count || 0} fixed samples`),
-    metricCard("NTRIP Connected", percent(summary?.ntrip_connected_count, ntripTotal), `${summary?.ntrip_connected_count || 0} connected samples`),
+    metricCard("Device Connected", numeric(summary?.connection_percent, 0, "%"), "Average over selected range"),
     metricCard("Resets", String(summary?.reset_count || 0), `Max uptime ${formatDuration(summary?.uptime_max_sec)}`),
   ].join("");
 }
@@ -1227,6 +1225,8 @@ function groupHourlyDeviceRows(rows) {
       fix_no_count: 0,
       ntrip_connected_count: 0,
       ntrip_disconnected_count: 0,
+      connection_percent_total: 0,
+      connection_percent_count: 0,
     };
     item.sample_count += Number(row.sample_count) || 0;
     item.fix_fixed_count += Number(row.fix_fixed_count) || 0;
@@ -1234,6 +1234,12 @@ function groupHourlyDeviceRows(rows) {
     item.fix_no_count += Number(row.fix_no_count) || 0;
     item.ntrip_connected_count += Number(row.ntrip_connected_count) || 0;
     item.ntrip_disconnected_count += Number(row.ntrip_disconnected_count) || 0;
+    const connectionPercent = Number(row.connection_percent);
+    if (Number.isFinite(connectionPercent)) {
+      item.connection_percent_total += connectionPercent;
+      item.connection_percent_count += 1;
+      item.connection_percent = item.connection_percent_total / item.connection_percent_count;
+    }
     grouped.set(hour, item);
   });
   return Array.from(grouped.values()).sort((a, b) => a.hour_ms - b.hour_ms);
@@ -1298,7 +1304,12 @@ function chartAxisLabels(points, width, height, padding, minValue, maxValue, suf
   return `${yLabels}${xLabels}`;
 }
 
-function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490", digits = 1 } = {}) {
+function renderLineChart(
+  el,
+  rows,
+  valueGetter,
+  { suffix = "", color = "#0f7490", digits = 1, minScale = null, maxScale = null } = {}
+) {
   const points = buildLinePoints(rows, valueGetter);
   if (!points.length) {
     el.innerHTML = `<div class="chart-empty">No matching values yet</div>`;
@@ -1310,13 +1321,23 @@ function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490"
   const values = points.map((point) => point.value);
   let minValue = Math.min(...values);
   let maxValue = Math.max(...values);
+  if (Number.isFinite(minScale)) {
+    minValue = Number(minScale);
+  }
+  if (Number.isFinite(maxScale)) {
+    maxValue = Number(maxScale);
+  }
   if (minValue === maxValue) {
     minValue = Math.max(0, minValue - 1);
     maxValue += 1;
-  } else {
+  } else if (!Number.isFinite(minScale) || !Number.isFinite(maxScale)) {
     const pad = (maxValue - minValue) * 0.12;
-    minValue = Math.max(0, minValue - pad);
-    maxValue += pad;
+    if (!Number.isFinite(minScale)) {
+      minValue = Math.max(0, minValue - pad);
+    }
+    if (!Number.isFinite(maxScale)) {
+      maxValue += pad;
+    }
   }
   const path = linePath(points, width, height, padding, minValue, maxValue);
   const fillPath = `${path} L ${points[points.length - 1].x.toFixed(2)} ${height - padding.bottom} L ${points[0].x.toFixed(2)} ${height - padding.bottom} Z`;
@@ -1371,7 +1392,7 @@ function renderLogCharts(hourly) {
 
   byId("distance-chart-title").textContent = "Closest Distance By Hour";
   byId("rtk-chart-title").textContent = "RTK Fixed Rate";
-  byId("ntrip-chart-title").textContent = "NTRIP Connected Rate";
+  byId("ntrip-chart-title").textContent = "Device Connection";
 
   const deviceRows = groupHourlyDeviceRows(hourly?.device_metrics || []);
   const pairRows = (hourly?.pair_metrics || []).filter((row) => row.closest_safe_distance_m !== null || row.closest_raw_distance_m !== null);
@@ -1388,16 +1409,13 @@ function renderLogCharts(hourly) {
       const total = Number(row.sample_count) || 0;
       return total > 0 ? ((Number(row.fix_fixed_count) || 0) / total) * 100 : NaN;
     },
-    { suffix: "%", color: "#0f8b5f", digits: 0 }
+    { suffix: "%", color: "#0f8b5f", digits: 0, minScale: 0, maxScale: 100 }
   );
   renderLineChart(
     byId("ntrip-chart"),
     deviceRows,
-    (row) => {
-      const total = (Number(row.ntrip_connected_count) || 0) + (Number(row.ntrip_disconnected_count) || 0);
-      return total > 0 ? ((Number(row.ntrip_connected_count) || 0) / total) * 100 : NaN;
-    },
-    { suffix: "%", color: "#0f7490", digits: 0 }
+    (row) => Number(row.connection_percent),
+    { suffix: "%", color: "#0f7490", digits: 0, minScale: 0, maxScale: 100 }
   );
 }
 
@@ -1417,13 +1435,13 @@ function renderLiveSampleCharts(samplesPayload) {
     byId("rtk-chart"),
     samples,
     (row) => (Number(row.fix_mode) === 4 ? 100 : 0),
-    { suffix: "%", color: "#0f8b5f", digits: 0 }
+    { suffix: "%", color: "#0f8b5f", digits: 0, minScale: 0, maxScale: 100 }
   );
   renderLineChart(
     byId("ntrip-chart"),
     statusRows,
     (row) => Number(row.connected_percent),
-    { suffix: "%", color: "#0f7490", digits: 0 }
+    { suffix: "%", color: "#0f7490", digits: 0, minScale: 0, maxScale: 100 }
   );
 }
 
