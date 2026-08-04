@@ -867,7 +867,7 @@ summary {
   opacity: 0.62;
 }
 
-.chart-hover-line[hidden] {
+.chart-hover-line.is-hidden {
   display: none;
 }
 

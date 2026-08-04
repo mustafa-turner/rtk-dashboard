@@ -1363,7 +1363,7 @@ function renderLineChart(
       ${axisLabels}
       <path class="chart-area" d="${fillPath}"></path>
       <path class="chart-line" d="${path}"></path>
-      <line class="chart-hover-line" x1="0" y1="${padding.top}" x2="0" y2="${height - padding.bottom}" hidden></line>
+      <line class="chart-hover-line is-hidden" x1="0" y1="${padding.top}" x2="0" y2="${height - padding.bottom}"></line>
       <rect class="chart-hit-area" x="${padding.left}" y="${padding.top}" width="${width - padding.left - padding.right}" height="${height - padding.top - padding.bottom}"></rect>
     </svg>
     <div class="chart-tooltip" hidden></div>
@@ -1376,11 +1376,11 @@ function renderLineChart(
     points.reduce((best, point) => (Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best), points[0]);
   const hideTooltip = () => {
     tooltip.hidden = true;
-    hoverLine.hidden = true;
+    hoverLine.classList.add("is-hidden");
   };
   const showTooltip = (point) => {
     tooltip.hidden = false;
-    hoverLine.hidden = false;
+    hoverLine.classList.remove("is-hidden");
     const displayValue =
       typeof valueFormatter === "function" ? valueFormatter(point.value, point.row) : Number(point.value).toFixed(digits) + suffix;
     tooltip.innerHTML = `
