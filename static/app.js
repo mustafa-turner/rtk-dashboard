@@ -1274,6 +1274,24 @@ function compactTimeLabel(ms) {
   return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" });
 }
 
+function chartXLabelTicks(points, width, padding) {
+  const first = points[0];
+  const last = points[points.length - 1];
+  const tickCount = width >= 460 ? 4 : 3;
+  if (first.time === last.time) {
+    return [{ time: first.time, x: padding.left, anchor: "start" }];
+  }
+  return Array.from({ length: tickCount }, (_, index) => {
+    const ratio = tickCount === 1 ? 0 : index / (tickCount - 1);
+    const time = first.time + (last.time - first.time) * ratio;
+    const x = padding.left + ratio * (width - padding.left - padding.right);
+    let anchor = "middle";
+    if (index === 0) anchor = "start";
+    if (index === tickCount - 1) anchor = "end";
+    return { time, x, anchor };
+  });
+}
+
 function chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits, yAxisLabels = null) {
   const valueMid = (minValue + maxValue) / 2;
   const yItems =
@@ -1298,12 +1316,13 @@ function chartAxisLabels(points, width, height, padding, minValue, maxValue, suf
     )
     .join("");
 
-  const first = points[0];
-  const last = points[points.length - 1];
-  const xLabels = `
-    <text class="chart-axis-label x-axis-label" x="${padding.left}" y="${height - 8}">${escapeHtml(compactTimeLabel(first.time))}</text>
-    <text class="chart-axis-label x-axis-label end" x="${width - padding.right}" y="${height - 8}">${escapeHtml(compactTimeLabel(last.time))}</text>
-  `;
+  const xLabels = chartXLabelTicks(points, width, padding)
+    .map(
+      (tick) => `
+        <text class="chart-axis-label x-axis-label ${tick.anchor}" x="${tick.x.toFixed(1)}" y="${height - 8}">${escapeHtml(compactTimeLabel(tick.time))}</text>
+      `
+    )
+    .join("");
   return `${yLabels}${xLabels}`;
 }
 
@@ -1328,7 +1347,7 @@ function renderLineChart(
     el.innerHTML = `<div class="chart-empty">No matching values yet</div>`;
     return;
   }
-  const width = 520;
+  const width = Math.max(360, Math.round(el.getBoundingClientRect().width || el.clientWidth || 520));
   const height = 236;
   const padding = { top: 18, right: 22, bottom: 42, left: leftPadding };
   const values = points.map((point) => point.value);

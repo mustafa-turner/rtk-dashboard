@@ -760,7 +760,7 @@ summary {
 
 .log-metric-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -854,6 +854,10 @@ summary {
 
 .x-axis-label {
   text-anchor: start;
+}
+
+.x-axis-label.middle {
+  text-anchor: middle;
 }
 
 .x-axis-label.end {
