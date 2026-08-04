@@ -1274,24 +1274,6 @@ function compactTimeLabel(ms) {
   return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" });
 }
 
-function chartXLabelTicks(points, width, padding) {
-  const first = points[0];
-  const last = points[points.length - 1];
-  const tickCount = width >= 460 ? 4 : 3;
-  if (first.time === last.time) {
-    return [{ time: first.time, x: padding.left, anchor: "start" }];
-  }
-  return Array.from({ length: tickCount }, (_, index) => {
-    const ratio = tickCount === 1 ? 0 : index / (tickCount - 1);
-    const time = first.time + (last.time - first.time) * ratio;
-    const x = padding.left + ratio * (width - padding.left - padding.right);
-    let anchor = "middle";
-    if (index === 0) anchor = "start";
-    if (index === tickCount - 1) anchor = "end";
-    return { time, x, anchor };
-  });
-}
-
 function chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits, yAxisLabels = null) {
   const valueMid = (minValue + maxValue) / 2;
   const yItems =
@@ -1316,13 +1298,12 @@ function chartAxisLabels(points, width, height, padding, minValue, maxValue, suf
     )
     .join("");
 
-  const xLabels = chartXLabelTicks(points, width, padding)
-    .map(
-      (tick) => `
-        <text class="chart-axis-label x-axis-label ${tick.anchor}" x="${tick.x.toFixed(1)}" y="${height - 8}">${escapeHtml(compactTimeLabel(tick.time))}</text>
-      `
-    )
-    .join("");
+  const first = points[0];
+  const last = points[points.length - 1];
+  const xLabels = `
+    <text class="chart-axis-label x-axis-label" x="${padding.left}" y="${height - 8}">${escapeHtml(compactTimeLabel(first.time))}</text>
+    <text class="chart-axis-label x-axis-label end" x="${width - padding.right}" y="${height - 8}">${escapeHtml(compactTimeLabel(last.time))}</text>
+  `;
   return `${yLabels}${xLabels}`;
 }
 
@@ -1393,6 +1374,10 @@ function renderLineChart(
   const hoverLine = el.querySelector(".chart-hover-line");
   const nearestPoint = (x) =>
     points.reduce((best, point) => (Math.abs(point.x - x) < Math.abs(best.x - x) ? point : best), points[0]);
+  const hideTooltip = () => {
+    tooltip.hidden = true;
+    hoverLine.hidden = true;
+  };
   const showTooltip = (point) => {
     tooltip.hidden = false;
     hoverLine.hidden = false;
@@ -1412,10 +1397,9 @@ function renderLineChart(
     const x = ((event.clientX - rect.left) / rect.width) * width;
     showTooltip(nearestPoint(Math.max(padding.left, Math.min(width - padding.right, x))));
   });
-  el.addEventListener("mouseleave", () => {
-    tooltip.hidden = true;
-    hoverLine.hidden = true;
-  });
+  svg.addEventListener("pointerleave", hideTooltip);
+  svg.addEventListener("pointercancel", hideTooltip);
+  el.addEventListener("mouseleave", hideTooltip);
 }
 
 function renderLogCharts(hourly) {
