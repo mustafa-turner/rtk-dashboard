@@ -1559,6 +1559,8 @@ function renderLogEvents(eventsPayload) {
 
 function renderLogs() {
   const logs = state.logs;
+  const selected = selectedDevice();
+  byId("logging-heading").textContent = selected ? `${displayNameForDevice(selected)} Operational History` : "Operational History";
   if (!logs?.summary?.enabled) {
     byId("log-metric-grid").innerHTML = metricCard("Logging", "Disabled", "Enable logging in config.yaml");
     byId("distance-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
