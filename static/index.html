@@ -105,10 +105,10 @@
             <select id="log-device" aria-label="Log device">
               <option value="">All devices</option>
             </select>
-            <label class="log-toggle">
-              <input type="checkbox" id="live-samples-toggle">
-              <span>Live samples</span>
-            </label>
+            <select id="log-chart-mode" aria-label="Chart mode">
+              <option value="hourly">Hourly trends</option>
+              <option value="live">Live data</option>
+            </select>
             <button type="button" id="refresh-logs">Refresh</button>
           </div>
         </section>
@@ -117,22 +117,17 @@
 
         <section class="log-chart-grid">
           <div class="log-panel">
-            <div class="panel-title">Closest Distance By Hour</div>
+            <div class="panel-title" id="distance-chart-title">Closest Distance By Hour</div>
             <div class="line-chart distance-chart" id="distance-chart"></div>
           </div>
           <div class="log-panel">
-            <div class="panel-title">RTK Fixed Rate</div>
+            <div class="panel-title" id="rtk-chart-title">RTK Fixed Rate</div>
             <div class="line-chart rtk-chart" id="rtk-chart"></div>
           </div>
           <div class="log-panel">
-            <div class="panel-title">NTRIP Connected Rate</div>
+            <div class="panel-title" id="ntrip-chart-title">NTRIP Connected Rate</div>
             <div class="line-chart ntrip-chart" id="ntrip-chart"></div>
           </div>
-        </section>
-
-        <section class="log-panel live-samples-panel" id="live-samples-panel" hidden>
-          <div class="panel-title">Live Logged Samples</div>
-          <div class="live-samples" id="live-samples"></div>
         </section>
 
         <section class="log-panel">

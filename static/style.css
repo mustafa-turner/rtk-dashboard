@@ -732,27 +732,6 @@ summary {
   font-weight: 800;
 }
 
-.log-toggle {
-  height: 36px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 800;
-  white-space: nowrap;
-}
-
-.log-toggle input {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-}
-
 .log-metric-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -885,49 +864,6 @@ summary {
   color: var(--muted);
   font-size: 13px;
   padding: 20px 0;
-}
-
-.live-samples-panel {
-  margin-bottom: 12px;
-}
-
-.live-samples {
-  min-width: 0;
-  overflow-x: auto;
-}
-
-.sample-table {
-  min-width: 720px;
-  display: grid;
-  gap: 0;
-  font-size: 12px;
-}
-
-.sample-row {
-  display: grid;
-  grid-template-columns: 150px minmax(130px, 1.3fr) 104px 104px 104px 90px;
-  gap: 8px;
-  align-items: center;
-  min-height: 38px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.sample-row:last-child {
-  border-bottom: 0;
-}
-
-.sample-row span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sample-head {
-  color: var(--muted);
-  font-weight: 850;
-  text-transform: uppercase;
 }
 
 .log-events {

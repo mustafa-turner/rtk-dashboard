@@ -222,6 +222,8 @@ def discover_mbtiles() -> list[dict[str, Any]]:
         return []
     tilesets: list[dict[str, Any]] = []
     for path in sorted(MBTILES_ROOT.glob("*.mbtiles")):
+        if path.stem.lower() in {"old", "backup", "archive"} or path.stem.lower().startswith(("old_", "backup_")):
+            continue
         info = read_mbtiles_info(path)
         if info is not None:
             tilesets.append(info)

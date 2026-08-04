@@ -1,3 +1,8 @@
 config.yaml
 __pycache__/
 *.pyc
+.DS_Store
+data/
+mbtiles/OLD*.mbtiles
+mbtiles/old*.mbtiles
+mbtiles/backup*.mbtiles

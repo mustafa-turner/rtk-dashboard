@@ -12,7 +12,7 @@ const state = {
   currentView: "live",
   logs: null,
   logsFetchInFlight: false,
-  liveSamplesEnabled: false,
+  logChartMode: "hourly",
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -1148,7 +1148,7 @@ async function refreshLogs() {
   const deviceId = byId("log-device")?.value || "";
   const params = new URLSearchParams({ range, from: String(from), to: String(to) });
   if (deviceId) params.set("device_id", deviceId);
-  const sampleParams = new URLSearchParams({ from: String(to - 5 * 60 * 1000), to: String(to), limit: "80" });
+  const sampleParams = new URLSearchParams({ from: String(to - 10 * 60 * 1000), to: String(to), limit: "500" });
   if (deviceId) sampleParams.set("device_id", deviceId);
   try {
     const requests = [
@@ -1156,7 +1156,7 @@ async function refreshLogs() {
       fetchJson(`/api/logs/hourly?${params.toString()}`),
       fetchJson(`/api/logs/events?${params.toString()}&limit=80`),
     ];
-    if (state.liveSamplesEnabled) {
+    if (state.logChartMode === "live") {
       requests.push(fetchJson(`/api/logs/samples?${sampleParams.toString()}`));
     }
     const [summary, hourly, events, samples] = await Promise.all(requests);
@@ -1236,7 +1236,7 @@ function buildLinePoints(rows, valueGetter) {
   return rows
     .map((row) => {
       const value = valueGetter(row);
-      const time = Number(row.hour_ms ?? row.closest_at_ms ?? row.at_ms);
+      const time = Number(row.at_ms ?? row.closest_at_ms ?? row.hour_ms);
       if (!Number.isFinite(time) || !Number.isFinite(value)) return null;
       return { row, time, value };
     })
@@ -1329,6 +1329,15 @@ function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490"
 }
 
 function renderLogCharts(hourly) {
+  if (state.logChartMode === "live") {
+    renderLiveSampleCharts(state.logs?.samples);
+    return;
+  }
+
+  byId("distance-chart-title").textContent = "Closest Distance By Hour";
+  byId("rtk-chart-title").textContent = "RTK Fixed Rate";
+  byId("ntrip-chart-title").textContent = "NTRIP Connected Rate";
+
   const deviceRows = groupHourlyDeviceRows(hourly?.device_metrics || []);
   const pairRows = (hourly?.pair_metrics || []).filter((row) => row.closest_safe_distance_m !== null || row.closest_raw_distance_m !== null);
   renderLineChart(
@@ -1357,48 +1366,29 @@ function renderLogCharts(hourly) {
   );
 }
 
-function sampleValue(sample, key, digits = 1, suffix = "") {
-  return numeric(sample?.[key], digits, suffix);
-}
-
-function renderLiveSamples(samplesPayload) {
-  const panel = byId("live-samples-panel");
-  const list = byId("live-samples");
-  panel.hidden = !state.liveSamplesEnabled;
-  if (!state.liveSamplesEnabled) return;
-
+function renderLiveSampleCharts(samplesPayload) {
   const samples = samplesPayload?.samples || [];
-  if (!samples.length) {
-    list.innerHTML = `<div class="log-event-empty">Waiting for logged samples</div>`;
-    return;
-  }
-
-  list.innerHTML = `
-    <div class="sample-table">
-      <div class="sample-row sample-head">
-        <span>Time</span>
-        <span>Device</span>
-        <span>Fix</span>
-        <span>Distance</span>
-        <span>Accuracy</span>
-        <span>Battery</span>
-      </div>
-      ${samples
-        .map(
-          (sample) => `
-            <div class="sample-row">
-              <span>${escapeHtml(timeLabel(sample.at_ms))}</span>
-              <span>${escapeHtml(sample.display_name || sample.device_id || "-")}</span>
-              <span>${escapeHtml(fixLabels[sample.fix_mode] || valueOrDash(sample.fix_mode))}</span>
-              <span>${escapeHtml(sampleValue(sample, "safe_distance_m", 2, " m"))}</span>
-              <span>${escapeHtml(sampleValue(sample, "accuracy_m", 3, " m"))}</span>
-              <span>${escapeHtml(sampleValue(sample, "battery_percent", 1, "%"))}</span>
-            </div>
-          `
-        )
-        .join("")}
-    </div>
-  `;
+  byId("distance-chart-title").textContent = "Live Distance";
+  byId("rtk-chart-title").textContent = "Live RTK Fixed";
+  byId("ntrip-chart-title").textContent = "Live NTRIP Connected";
+  renderLineChart(
+    byId("distance-chart"),
+    samples,
+    (row) => Number(row.safe_distance_m ?? row.raw_distance_m),
+    { suffix: " m", color: "#c2410c", digits: 2 }
+  );
+  renderLineChart(
+    byId("rtk-chart"),
+    samples,
+    (row) => (Number(row.fix_mode) === 4 ? 100 : 0),
+    { suffix: "%", color: "#0f8b5f", digits: 0 }
+  );
+  renderLineChart(
+    byId("ntrip-chart"),
+    samples,
+    (row) => (Number(row.ntrip_status) === 1 ? 100 : 0),
+    { suffix: "%", color: "#0f7490", digits: 0 }
+  );
 }
 
 function renderLogEvents(eventsPayload) {
@@ -1431,13 +1421,11 @@ function renderLogs() {
     byId("distance-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
     byId("rtk-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
     byId("ntrip-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
-    byId("live-samples-panel").hidden = true;
     byId("log-events").innerHTML = `<div class="log-event-empty">Logging is disabled</div>`;
     return;
   }
   renderLogMetrics(logs.summary);
   renderLogCharts(logs.hourly);
-  renderLiveSamples(logs.samples);
   renderLogEvents(logs.events);
 }
 
@@ -1507,8 +1495,8 @@ async function boot() {
   byId("log-range").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
   byId("log-device").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
   byId("refresh-logs").addEventListener("click", () => refreshLogs().catch((error) => console.error(error)));
-  byId("live-samples-toggle").addEventListener("change", (event) => {
-    state.liveSamplesEnabled = Boolean(event.target.checked);
+  byId("log-chart-mode").addEventListener("change", (event) => {
+    state.logChartMode = event.target.value === "live" ? "live" : "hourly";
     refreshLogs().catch((error) => console.error(error));
   });
 
