@@ -1184,16 +1184,6 @@ function metricCard(label, value, note = "") {
   `;
 }
 
-function formatDuration(seconds) {
-  const value = Number(seconds);
-  if (!Number.isFinite(value) || value < 0) return "-";
-  const hours = Math.floor(value / 3600);
-  const minutes = Math.floor((value % 3600) / 60);
-  if (hours >= 24) return `${(hours / 24).toFixed(1)} d`;
-  if (hours > 0) return `${hours} h ${minutes} m`;
-  return `${minutes} m`;
-}
-
 function renderLogMetrics(summary) {
   const sampleCount = Number(summary?.sample_count) || 0;
   const fixTotal =
@@ -1208,7 +1198,6 @@ function renderLogMetrics(summary) {
     metricCard("Closest Distance", numeric(closestValue, 2, " m"), closest ? dateTimeLabel(closest.closest_at_ms) : "-"),
     metricCard("RTK Fixed", percent(summary?.fix_fixed_count, fixTotal), `${summary?.fix_fixed_count || 0} fixed samples`),
     metricCard("Device Connected", numeric(summary?.connection_percent, 0, "%"), "Average over selected range"),
-    metricCard("Resets", String(summary?.reset_count || 0), `Max uptime ${formatDuration(summary?.uptime_max_sec)}`),
   ].join("");
 }
 
