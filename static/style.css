@@ -179,6 +179,38 @@ h1 {
   box-shadow: 0 0 0 3px rgba(194, 65, 12, 0.16);
 }
 
+.view-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f3f5f7;
+}
+
+.view-tab {
+  min-width: 72px;
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.view-tab.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 1px 4px rgba(25, 27, 31, 0.12);
+}
+
+.app-view[hidden] {
+  display: none;
+}
+
 .dashboard-grid {
   min-height: 0;
   flex: 1;
@@ -655,6 +687,178 @@ summary {
   overflow-wrap: anywhere;
 }
 
+.logging-view {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  background: #f9fafb;
+  padding: 16px;
+}
+
+.logging-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.logging-toolbar h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.logging-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.logging-controls select,
+.logging-controls button {
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 0 10px;
+}
+
+.logging-controls button {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.log-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.log-metric,
+.log-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.log-metric {
+  min-height: 96px;
+  padding: 12px;
+}
+
+.log-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.log-metric strong {
+  display: block;
+  font-size: 24px;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.log-metric small {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.log-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.log-panel {
+  padding: 12px;
+}
+
+.spark-bars {
+  height: 180px;
+  display: flex;
+  align-items: end;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.spark-bar {
+  flex: 1;
+  min-width: 5px;
+  min-height: 2px;
+  border-radius: 4px 4px 0 0;
+  background: var(--cyan);
+}
+
+.distance-bars .spark-bar {
+  background: var(--red);
+}
+
+.rtk-bars .spark-bar {
+  background: var(--green);
+}
+
+.ntrip-bars .spark-bar {
+  background: var(--cyan);
+}
+
+.spark-empty,
+.log-event-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 20px 0;
+}
+
+.log-events {
+  display: grid;
+  gap: 8px;
+}
+
+.log-event {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fcfcfd;
+}
+
+.log-event-time,
+.log-event-device {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.log-event-message {
+  min-width: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.log-event-type {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .leaflet-popup-content-wrapper,
 .leaflet-popup-tip {
   color: var(--ink);
@@ -731,6 +935,10 @@ summary {
     justify-content: flex-start;
   }
 
+  .view-tabs {
+    order: 2;
+  }
+
   .dashboard-grid {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(220px, 32vh) auto auto;
@@ -759,6 +967,20 @@ summary {
   .details-panel {
     order: 4;
   }
+
+  .logging-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .logging-controls {
+    justify-content: flex-start;
+  }
+
+  .log-metric-grid,
+  .log-chart-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 520px) {
@@ -773,6 +995,14 @@ summary {
 
   .rover-tab {
     min-width: 122px;
+  }
+
+  .view-tabs {
+    width: 100%;
+  }
+
+  .view-tab {
+    flex: 1;
   }
 
   .dashboard-grid {
@@ -803,6 +1033,10 @@ summary {
   }
 
   .safety-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .log-event {
     grid-template-columns: 1fr;
   }
 }

@@ -19,13 +19,17 @@
           </div>
         </div>
         <div class="header-rover-list" id="header-rover-list"></div>
+        <nav class="view-tabs" aria-label="Dashboard views">
+          <button type="button" class="view-tab active" data-view="live">Live</button>
+          <button type="button" class="view-tab" data-view="logging">Logging</button>
+        </nav>
         <div class="status-strip">
           <div class="status-dot" id="live-dot"></div>
           <span id="live-label">Waiting</span>
         </div>
       </header>
 
-      <main class="dashboard-grid">
+      <main class="dashboard-grid app-view active" id="live-view">
         <section class="map-panel">
           <div id="map"></div>
           <div class="map-overlay">
@@ -84,6 +88,48 @@
             </details>
           </section>
         </aside>
+      </main>
+
+      <main class="logging-view app-view" id="logging-view" hidden>
+        <section class="logging-toolbar">
+          <div>
+            <div class="panel-title">Logging</div>
+            <h2>Operational History</h2>
+          </div>
+          <div class="logging-controls">
+            <select id="log-range" aria-label="Log range">
+              <option value="24h">24 hours</option>
+              <option value="7d">7 days</option>
+              <option value="30d">30 days</option>
+            </select>
+            <select id="log-device" aria-label="Log device">
+              <option value="">All devices</option>
+            </select>
+            <button type="button" id="refresh-logs">Refresh</button>
+          </div>
+        </section>
+
+        <section class="log-metric-grid" id="log-metric-grid"></section>
+
+        <section class="log-chart-grid">
+          <div class="log-panel">
+            <div class="panel-title">Closest Distance By Hour</div>
+            <div class="spark-bars distance-bars" id="distance-bars"></div>
+          </div>
+          <div class="log-panel">
+            <div class="panel-title">RTK Fixed Rate</div>
+            <div class="spark-bars rtk-bars" id="rtk-bars"></div>
+          </div>
+          <div class="log-panel">
+            <div class="panel-title">NTRIP Connected Rate</div>
+            <div class="spark-bars ntrip-bars" id="ntrip-bars"></div>
+          </div>
+        </section>
+
+        <section class="log-panel">
+          <div class="panel-title">Events</div>
+          <div class="log-events" id="log-events"></div>
+        </section>
       </main>
     </div>
 

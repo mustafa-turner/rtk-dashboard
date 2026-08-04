@@ -12,6 +12,15 @@ udpPeers:
   port: 5005
   maxAgeSec: 5
 
+logging:
+  enabled: true
+  databasePath: data/rtk-dashboard.sqlite
+  rawRetentionDays: 30
+  # 0 keeps hourly summaries indefinitely.
+  summaryRetentionDays: 0
+  sampleMinIntervalSec: 2
+  rollupIntervalSec: 300
+
 dashboard:
   title: Crane Rover Dashboard
   roverAntennaOffset:

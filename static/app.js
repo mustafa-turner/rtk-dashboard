@@ -9,6 +9,9 @@ const state = {
   lastVersion: -1,
   stateFetchInFlight: false,
   fallbackPollMs: 5000,
+  currentView: "live",
+  logs: null,
+  logsFetchInFlight: false,
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -64,6 +67,28 @@ function ageLabel(lastSeenMs, nowMs) {
     return `${seconds}s`;
   }
   return `${Math.round(seconds / 60)}m`;
+}
+
+function dateTimeLabel(ms) {
+  const number = Number(ms);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "-";
+  }
+  return new Date(number).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function percent(numerator, denominator, digits = 0) {
+  const top = Number(numerator);
+  const bottom = Number(denominator);
+  if (!Number.isFinite(top) || !Number.isFinite(bottom) || bottom <= 0) {
+    return "-";
+  }
+  return `${((top / bottom) * 100).toFixed(digits)}%`;
 }
 
 function snapshotNowMs(snapshot) {
@@ -1046,6 +1071,240 @@ function formatRawValue(value) {
   return valueOrDash(value);
 }
 
+function setActiveView(view) {
+  state.currentView = view;
+  document.querySelectorAll(".view-tab").forEach((button) => {
+    const active = button.dataset.view === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  byId("live-view").hidden = view !== "live";
+  byId("logging-view").hidden = view !== "logging";
+  if (view === "logging") {
+    refreshLogs().catch((error) => console.error("Log refresh failed", error));
+  } else if (state.map) {
+    window.requestAnimationFrame(() => state.map.invalidateSize());
+  }
+}
+
+function logRangeMs() {
+  return parseRangeToMs(byId("log-range")?.value || "24h");
+}
+
+function parseRangeToMs(value) {
+  const text = String(value || "24h").trim().toLowerCase();
+  const amount = Number.parseFloat(text);
+  if (!Number.isFinite(amount) || amount <= 0) return 24 * 60 * 60 * 1000;
+  if (text.endsWith("d")) return amount * 24 * 60 * 60 * 1000;
+  if (text.endsWith("w")) return amount * 7 * 24 * 60 * 60 * 1000;
+  return amount * 60 * 60 * 1000;
+}
+
+function updateLogDeviceOptions(snapshot) {
+  const select = byId("log-device");
+  if (!select) return;
+  const previous = select.value;
+  const devices = sortedDevices(snapshot);
+  select.innerHTML = `<option value="">All devices</option>`;
+  devices.forEach((device) => {
+    const option = document.createElement("option");
+    option.value = device.device_id;
+    option.textContent = displayNameForDevice(device);
+    select.append(option);
+  });
+  select.value = devices.some((device) => device.device_id === previous) ? previous : "";
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`${url} returned ${response.status}`);
+  }
+  return response.json();
+}
+
+async function refreshLogs() {
+  if (state.logsFetchInFlight) return;
+  state.logsFetchInFlight = true;
+  const range = byId("log-range")?.value || "24h";
+  const rangeMs = logRangeMs();
+  const to = Date.now();
+  const from = to - rangeMs;
+  const deviceId = byId("log-device")?.value || "";
+  const params = new URLSearchParams({ range, from: String(from), to: String(to) });
+  if (deviceId) params.set("device_id", deviceId);
+  try {
+    const [summary, hourly, events] = await Promise.all([
+      fetchJson(`/api/logs/summary?${params.toString()}`),
+      fetchJson(`/api/logs/hourly?${params.toString()}`),
+      fetchJson(`/api/logs/events?${params.toString()}&limit=80`),
+    ]);
+    state.logs = { summary, hourly, events };
+    renderLogs();
+  } finally {
+    state.logsFetchInFlight = false;
+  }
+}
+
+function metricCard(label, value, note = "") {
+  return `
+    <div class="log-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(note)}</small>
+    </div>
+  `;
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "-";
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  if (hours >= 24) return `${(hours / 24).toFixed(1)} d`;
+  if (hours > 0) return `${hours} h ${minutes} m`;
+  return `${minutes} m`;
+}
+
+function renderLogMetrics(summary) {
+  const sampleCount = Number(summary?.sample_count) || 0;
+  const fixTotal =
+    (Number(summary?.fix_fixed_count) || 0) +
+    (Number(summary?.fix_float_count) || 0) +
+    (Number(summary?.fix_no_count) || 0);
+  const ntripTotal =
+    (Number(summary?.ntrip_connected_count) || 0) + (Number(summary?.ntrip_disconnected_count) || 0);
+  const closest = summary?.closest;
+  const closestValue = closest?.closest_safe_distance_m ?? closest?.closest_raw_distance_m;
+
+  byId("log-metric-grid").innerHTML = [
+    metricCard("Samples", sampleCount.toLocaleString(), `Last ${dateTimeLabel(summary?.last_sample_ms)}`),
+    metricCard("Closest Distance", numeric(closestValue, 2, " m"), closest ? dateTimeLabel(closest.closest_at_ms) : "-"),
+    metricCard("RTK Fixed", percent(summary?.fix_fixed_count, fixTotal), `${summary?.fix_fixed_count || 0} fixed samples`),
+    metricCard("NTRIP Connected", percent(summary?.ntrip_connected_count, ntripTotal), `${summary?.ntrip_connected_count || 0} connected samples`),
+    metricCard("Resets", String(summary?.reset_count || 0), `Max uptime ${formatDuration(summary?.uptime_max_sec)}`),
+  ].join("");
+}
+
+function groupHourlyDeviceRows(rows) {
+  const grouped = new Map();
+  rows.forEach((row) => {
+    const hour = Number(row.hour_ms);
+    if (!Number.isFinite(hour)) return;
+    const item = grouped.get(hour) || {
+      hour_ms: hour,
+      sample_count: 0,
+      fix_fixed_count: 0,
+      fix_float_count: 0,
+      fix_no_count: 0,
+      ntrip_connected_count: 0,
+      ntrip_disconnected_count: 0,
+    };
+    item.sample_count += Number(row.sample_count) || 0;
+    item.fix_fixed_count += Number(row.fix_fixed_count) || 0;
+    item.fix_float_count += Number(row.fix_float_count) || 0;
+    item.fix_no_count += Number(row.fix_no_count) || 0;
+    item.ntrip_connected_count += Number(row.ntrip_connected_count) || 0;
+    item.ntrip_disconnected_count += Number(row.ntrip_disconnected_count) || 0;
+    grouped.set(hour, item);
+  });
+  return Array.from(grouped.values()).sort((a, b) => a.hour_ms - b.hour_ms);
+}
+
+function renderBars(el, rows, valueGetter, { inverse = false, suffix = "" } = {}) {
+  if (!rows.length) {
+    el.innerHTML = `<div class="spark-empty">No hourly data yet</div>`;
+    return;
+  }
+  const values = rows.map(valueGetter).filter((value) => Number.isFinite(value));
+  if (!values.length) {
+    el.innerHTML = `<div class="spark-empty">No matching values yet</div>`;
+    return;
+  }
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  el.innerHTML = rows
+    .map((row) => {
+      const value = valueGetter(row);
+      const normalized = Number.isFinite(value)
+        ? inverse
+          ? 1 - (value - min) / Math.max(1, max - min)
+          : value / max
+        : 0;
+      const height = Math.max(2, Math.round(normalized * 100));
+      const label = Number.isFinite(value) ? `${value.toFixed(value < 10 ? 2 : 0)}${suffix}` : "-";
+      return `<div class="spark-bar" title="${escapeHtml(`${dateTimeLabel(row.hour_ms)}: ${label}`)}" style="height: ${height}%"></div>`;
+    })
+    .join("");
+}
+
+function renderLogCharts(hourly) {
+  const deviceRows = groupHourlyDeviceRows(hourly?.device_metrics || []);
+  const pairRows = (hourly?.pair_metrics || []).filter((row) => row.closest_safe_distance_m !== null || row.closest_raw_distance_m !== null);
+  renderBars(
+    byId("distance-bars"),
+    pairRows,
+    (row) => Number(row.closest_safe_distance_m ?? row.closest_raw_distance_m),
+    { inverse: true, suffix: " m" }
+  );
+  renderBars(
+    byId("rtk-bars"),
+    deviceRows,
+    (row) => {
+      const total = Number(row.sample_count) || 0;
+      return total > 0 ? ((Number(row.fix_fixed_count) || 0) / total) * 100 : NaN;
+    },
+    { suffix: "%" }
+  );
+  renderBars(
+    byId("ntrip-bars"),
+    deviceRows,
+    (row) => {
+      const total = (Number(row.ntrip_connected_count) || 0) + (Number(row.ntrip_disconnected_count) || 0);
+      return total > 0 ? ((Number(row.ntrip_connected_count) || 0) / total) * 100 : NaN;
+    },
+    { suffix: "%" }
+  );
+}
+
+function renderLogEvents(eventsPayload) {
+  const events = eventsPayload?.events || [];
+  const panel = byId("log-events");
+  if (!events.length) {
+    panel.innerHTML = `<div class="log-event-empty">No events for this range</div>`;
+    return;
+  }
+  panel.innerHTML = events
+    .map(
+      (event) => `
+        <div class="log-event">
+          <div class="log-event-time">${escapeHtml(dateTimeLabel(event.at_ms))}</div>
+          <div class="log-event-message">
+            <strong>${escapeHtml(event.message || event.event_type)}</strong>
+            <div class="log-event-device">${escapeHtml(event.device_id || "Dashboard")}</div>
+          </div>
+          <div class="log-event-type">${escapeHtml(event.event_type || "event")}</div>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function renderLogs() {
+  const logs = state.logs;
+  if (!logs?.summary?.enabled) {
+    byId("log-metric-grid").innerHTML = metricCard("Logging", "Disabled", "Enable logging in config.yaml");
+    byId("distance-bars").innerHTML = `<div class="spark-empty">Logging is disabled</div>`;
+    byId("rtk-bars").innerHTML = `<div class="spark-empty">Logging is disabled</div>`;
+    byId("ntrip-bars").innerHTML = `<div class="spark-empty">Logging is disabled</div>`;
+    byId("log-events").innerHTML = `<div class="log-event-empty">Logging is disabled</div>`;
+    return;
+  }
+  renderLogMetrics(logs.summary);
+  renderLogCharts(logs.hourly);
+  renderLogEvents(logs.events);
+}
+
 function render(snapshot) {
   state.lastVersion = Math.max(state.lastVersion, snapshotVersion(snapshot));
   state.data = snapshot;
@@ -1057,6 +1316,7 @@ function render(snapshot) {
   updateSafety(selected, snapshot, safetyRovers);
   renderTelemetryCompare(safetyRovers);
   renderHeaderRovers(snapshot);
+  updateLogDeviceOptions(snapshot);
   updateMarkers(snapshot);
   updateSelectedLabel(selected);
   renderRawPayloads(payloadRovers);
@@ -1105,6 +1365,13 @@ async function boot() {
   const snapshot = await fetchLatestState();
   initMap(snapshot.server);
 
+  document.querySelectorAll(".view-tab").forEach((button) => {
+    button.addEventListener("click", () => setActiveView(button.dataset.view || "live"));
+  });
+  byId("log-range").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
+  byId("log-device").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
+  byId("refresh-logs").addEventListener("click", () => refreshLogs().catch((error) => console.error(error)));
+
   const events = new EventSource("/events");
   events.onopen = () => {
     state.eventStreamConnected = true;
@@ -1128,6 +1395,11 @@ async function boot() {
       console.error("State refresh failed", error);
     });
   }, state.fallbackPollMs);
+  setInterval(() => {
+    if (state.currentView === "logging") {
+      refreshLogs().catch((error) => console.error("Log refresh failed", error));
+    }
+  }, 30000);
 }
 
 boot().catch((error) => {

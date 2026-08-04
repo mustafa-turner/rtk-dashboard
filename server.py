@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 try:
     import yaml
@@ -122,6 +122,14 @@ def load_config(path: Path) -> dict[str, Any]:
         "mqtt": {"host": "0.0.0.0", "port": 1883},
         "http": {"host": "0.0.0.0", "port": 8080},
         "udpPeers": {"enabled": True, "host": "0.0.0.0", "port": 5005, "maxAgeSec": 5},
+        "logging": {
+            "enabled": True,
+            "databasePath": "data/rtk-dashboard.sqlite",
+            "rawRetentionDays": 30,
+            "summaryRetentionDays": 0,
+            "sampleMinIntervalSec": 2,
+            "rollupIntervalSec": 300,
+        },
         "dashboard": {
             "title": "Crane Rover Dashboard",
             "defaultCenter": {"latitude": -2.5489, "longitude": 118.0149, "zoom": 5},
@@ -262,6 +270,70 @@ def has_valid_position(payload: dict[str, Any]) -> bool:
     return math.isfinite(lat_num) and math.isfinite(lon_num) and (lat_num != 0 or lon_num != 0)
 
 
+def finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def finite_int(value: Any) -> int | None:
+    number = finite_float(value)
+    if number is None:
+        return None
+    return int(number)
+
+
+def first_numeric(payload: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = finite_float(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def infer_device_type(payload: dict[str, Any], source_type: str = "") -> str:
+    explicit = str(payload.get("device_type") or payload.get("deviceType") or payload.get("type") or "").strip()
+    if explicit:
+        return explicit
+    keys = set(payload)
+    if {"nearest_peer_distance_m", "nearest_peer_safe_distance_m", "fix_mode"} & keys:
+        return "crane_rover"
+    if {"tide_m", "water_level_m", "tide_level_m"} & keys:
+        return "tide_sensor"
+    if {"truck_id", "speed_kph", "heading_deg"} & keys:
+        return "truck"
+    return source_type or "device"
+
+
+def parse_range_ms(value: str | None, default_ms: int = 24 * 60 * 60 * 1000) -> int:
+    if not value:
+        return default_ms
+    text = value.strip().lower()
+    units = {
+        "h": 60 * 60 * 1000,
+        "d": 24 * 60 * 60 * 1000,
+        "w": 7 * 24 * 60 * 60 * 1000,
+    }
+    for suffix, multiplier in units.items():
+        if text.endswith(suffix):
+            amount = finite_float(text[:-1])
+            return int(amount * multiplier) if amount and amount > 0 else default_ms
+    amount = finite_float(text)
+    return int(amount) if amount and amount > 0 else default_ms
+
+
+def parse_query_ms(value: str | None, default: int) -> int:
+    parsed = finite_float(value)
+    return int(parsed) if parsed is not None and parsed > 0 else default
+
+
+def first_query_value(query: dict[str, list[str]], key: str) -> str:
+    values = query.get(key) or []
+    return values[0] if values else ""
+
+
 def is_ip_address(value: str) -> bool:
     try:
         ipaddress.ip_address(value)
@@ -321,6 +393,656 @@ class DeviceRecord:
         }
 
 
+class TelemetryLogger:
+    def __init__(self, config: dict[str, Any]):
+        self.config = config
+        logging_cfg = config.get("logging", {})
+        self.enabled = bool(logging_cfg.get("enabled", True))
+        self.raw_retention_days = int(logging_cfg.get("rawRetentionDays", 30) or 0)
+        self.summary_retention_days = int(logging_cfg.get("summaryRetentionDays", 0) or 0)
+        self.sample_min_interval_ms = int(float(logging_cfg.get("sampleMinIntervalSec", 2) or 0) * 1000)
+        self.rollup_interval_sec = float(logging_cfg.get("rollupIntervalSec", 300) or 300)
+        self._lock = threading.RLock()
+        self._last_sample_by_device: dict[str, int] = {}
+        self._last_uptime_by_device: dict[str, float] = {}
+        self._last_cleanup_ms = 0
+        self._stop = threading.Event()
+
+        if not self.enabled:
+            self.path = Path("")
+            self.con = None
+            return
+
+        db_path = Path(str(logging_cfg.get("databasePath") or "data/rtk-dashboard.sqlite"))
+        self.path = db_path if db_path.is_absolute() else ROOT / db_path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.con = sqlite3.connect(self.path, check_same_thread=False)
+        self.con.row_factory = sqlite3.Row
+        self._initialize()
+
+    def _initialize(self) -> None:
+        if self.con is None:
+            return
+        with self._lock:
+            self.con.execute("pragma journal_mode=WAL")
+            self.con.execute("pragma synchronous=NORMAL")
+            self.con.execute("pragma foreign_keys=ON")
+            self.con.executescript(
+                """
+                create table if not exists devices (
+                    device_id text primary key,
+                    display_name text,
+                    device_type text,
+                    source_type text,
+                    source_host text,
+                    mqtt_client_id text,
+                    username text,
+                    first_seen_ms integer not null,
+                    last_seen_ms integer not null
+                );
+
+                create table if not exists telemetry_samples (
+                    id integer primary key autoincrement,
+                    at_ms integer not null,
+                    device_id text not null,
+                    display_name text,
+                    device_type text,
+                    source_type text not null,
+                    topic text,
+                    source_host text,
+                    mqtt_client_id text,
+                    username text,
+                    peer_id text,
+                    latitude real,
+                    longitude real,
+                    fix_mode integer,
+                    ntrip_status integer,
+                    safe_distance_m real,
+                    raw_distance_m real,
+                    uncertainty_m real,
+                    accuracy_m real,
+                    peer_accuracy_m real,
+                    battery_percent real,
+                    battery_voltage_v real,
+                    uptime_sec real,
+                    payload_json text not null
+                );
+
+                create index if not exists idx_samples_at on telemetry_samples(at_ms);
+                create index if not exists idx_samples_device_at on telemetry_samples(device_id, at_ms);
+                create index if not exists idx_samples_peer_at on telemetry_samples(device_id, peer_id, at_ms);
+
+                create table if not exists hourly_device_metrics (
+                    hour_ms integer not null,
+                    device_id text not null,
+                    display_name text,
+                    device_type text,
+                    sample_count integer not null,
+                    fix_fixed_count integer not null,
+                    fix_float_count integer not null,
+                    fix_no_count integer not null,
+                    ntrip_connected_count integer not null,
+                    ntrip_disconnected_count integer not null,
+                    accuracy_min_m real,
+                    accuracy_avg_m real,
+                    accuracy_max_m real,
+                    battery_min_percent real,
+                    battery_avg_percent real,
+                    battery_max_percent real,
+                    uptime_max_sec real,
+                    reset_count integer not null,
+                    updated_ms integer not null,
+                    primary key (hour_ms, device_id)
+                );
+
+                create table if not exists hourly_pair_metrics (
+                    hour_ms integer not null,
+                    device_id text not null,
+                    peer_id text not null,
+                    closest_safe_distance_m real,
+                    closest_raw_distance_m real,
+                    closest_uncertainty_m real,
+                    closest_at_ms integer,
+                    sample_count integer not null,
+                    updated_ms integer not null,
+                    primary key (hour_ms, device_id, peer_id)
+                );
+
+                create table if not exists system_events (
+                    id integer primary key autoincrement,
+                    at_ms integer not null,
+                    event_type text not null,
+                    device_id text,
+                    severity text not null default 'info',
+                    message text not null,
+                    data_json text not null default '{}'
+                );
+
+                create index if not exists idx_events_at on system_events(at_ms);
+                create index if not exists idx_events_device_at on system_events(device_id, at_ms);
+                """
+            )
+            self.con.commit()
+
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        thread = threading.Thread(target=self._run_rollups, name="telemetry-logger-rollups", daemon=True)
+        thread.start()
+
+    def _run_rollups(self) -> None:
+        while not self._stop.wait(self.rollup_interval_sec):
+            try:
+                self.rollup_recent()
+            except Exception as exc:
+                logging.warning("Telemetry rollup failed: %s", exc)
+
+    def log_event(
+        self,
+        event_type: str,
+        message: str,
+        data: dict[str, Any] | None = None,
+        *,
+        device_id: str | None = None,
+        severity: str = "info",
+    ) -> None:
+        if not self.enabled or self.con is None:
+            return
+        at_ms = now_ms()
+        with self._lock:
+            self.con.execute(
+                """
+                insert into system_events (at_ms, event_type, device_id, severity, message, data_json)
+                values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    at_ms,
+                    event_type,
+                    device_id,
+                    severity,
+                    message,
+                    json.dumps(data or {}, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            self.con.commit()
+
+    def log_sample(
+        self,
+        *,
+        device_id: str,
+        display_name: str,
+        payload: dict[str, Any],
+        source_type: str,
+        topic: str = "",
+        source_host: str = "",
+        mqtt_client_id: str = "",
+        username: str = "",
+    ) -> None:
+        if not self.enabled or self.con is None or not payload:
+            return
+        at_ms = now_ms()
+        last_sample_ms = self._last_sample_by_device.get(device_id, 0)
+        if self.sample_min_interval_ms and at_ms - last_sample_ms < self.sample_min_interval_ms:
+            return
+
+        device_type = infer_device_type(payload, source_type)
+        uptime_sec = first_numeric(
+            payload,
+            (
+                "uptime_sec",
+                "app_uptime_sec",
+                "device_uptime_sec",
+                "uptime_s",
+                "app_uptime_s",
+                "device_uptime_s",
+                "uptime",
+            ),
+        )
+        previous_uptime = self._last_uptime_by_device.get(device_id)
+        if uptime_sec is not None:
+            self._last_uptime_by_device[device_id] = uptime_sec
+
+        lat = finite_float(payload.get("latitude"))
+        lon = finite_float(payload.get("longitude"))
+        if (lat is None or lon is None) and isinstance(payload.get("position"), list) and len(payload["position"]) >= 2:
+            lon = finite_float(payload["position"][0])
+            lat = finite_float(payload["position"][1])
+
+        raw_json = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
+        values = (
+            at_ms,
+            device_id,
+            display_name,
+            device_type,
+            source_type,
+            topic,
+            source_host,
+            mqtt_client_id,
+            username,
+            str(payload.get("nearest_peer_id") or payload.get("peer_id") or ""),
+            lat,
+            lon,
+            finite_int(payload.get("fix_mode")),
+            finite_int(payload.get("ntrip_status")),
+            finite_float(payload.get("nearest_peer_safe_distance_m")),
+            finite_float(payload.get("nearest_peer_distance_m")),
+            finite_float(payload.get("nearest_peer_uncertainty_m")),
+            first_numeric(payload, ("local_accuracy_m", "accuracy_m", "horizontal_accuracy_m")),
+            finite_float(payload.get("nearest_peer_accuracy_m")),
+            finite_float(payload.get("battery_percent")),
+            finite_float(payload.get("battery_voltage_v")),
+            uptime_sec,
+            raw_json,
+        )
+
+        with self._lock:
+            existing = self.con.execute("select last_seen_ms from devices where device_id = ?", (device_id,)).fetchone()
+            if existing is not None and at_ms - int(existing["last_seen_ms"]) > 5 * 60 * 1000:
+                self.con.execute(
+                    """
+                    insert into system_events (at_ms, event_type, device_id, severity, message, data_json)
+                    values (?, 'telemetry_gap', ?, 'warn', ?, ?)
+                    """,
+                    (
+                        at_ms,
+                        device_id,
+                        f"{display_name or device_id} resumed after telemetry gap",
+                        json.dumps({"previous_last_seen_ms": int(existing["last_seen_ms"])}, separators=(",", ":")),
+                    ),
+                )
+
+            self.con.execute(
+                """
+                insert into devices (
+                    device_id, display_name, device_type, source_type, source_host, mqtt_client_id, username,
+                    first_seen_ms, last_seen_ms
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(device_id) do update set
+                    display_name = excluded.display_name,
+                    device_type = excluded.device_type,
+                    source_type = excluded.source_type,
+                    source_host = excluded.source_host,
+                    mqtt_client_id = excluded.mqtt_client_id,
+                    username = excluded.username,
+                    last_seen_ms = excluded.last_seen_ms
+                """,
+                (
+                    device_id,
+                    display_name,
+                    device_type,
+                    source_type,
+                    source_host,
+                    mqtt_client_id,
+                    username,
+                    at_ms,
+                    at_ms,
+                ),
+            )
+            self.con.execute(
+                """
+                insert into telemetry_samples (
+                    at_ms, device_id, display_name, device_type, source_type, topic, source_host,
+                    mqtt_client_id, username, peer_id, latitude, longitude, fix_mode, ntrip_status,
+                    safe_distance_m, raw_distance_m, uncertainty_m, accuracy_m, peer_accuracy_m,
+                    battery_percent, battery_voltage_v, uptime_sec, payload_json
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            if previous_uptime is not None and uptime_sec is not None and uptime_sec + 5 < previous_uptime:
+                self.con.execute(
+                    """
+                    insert into system_events (at_ms, event_type, device_id, severity, message, data_json)
+                    values (?, 'device_reset', ?, 'warn', ?, ?)
+                    """,
+                    (
+                        at_ms,
+                        device_id,
+                        f"{display_name or device_id} uptime reset",
+                        json.dumps(
+                            {"previous_uptime_sec": previous_uptime, "uptime_sec": uptime_sec},
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
+            self.con.commit()
+            self._last_sample_by_device[device_id] = at_ms
+
+        if at_ms - self._last_cleanup_ms > 60 * 60 * 1000:
+            self.cleanup()
+            self._last_cleanup_ms = at_ms
+
+    def cleanup(self) -> None:
+        if not self.enabled or self.con is None:
+            return
+        current_ms = now_ms()
+        with self._lock:
+            if self.raw_retention_days > 0:
+                cutoff = current_ms - self.raw_retention_days * 24 * 60 * 60 * 1000
+                self.con.execute("delete from telemetry_samples where at_ms < ?", (cutoff,))
+            if self.summary_retention_days > 0:
+                cutoff = current_ms - self.summary_retention_days * 24 * 60 * 60 * 1000
+                self.con.execute("delete from hourly_device_metrics where hour_ms < ?", (cutoff,))
+                self.con.execute("delete from hourly_pair_metrics where hour_ms < ?", (cutoff,))
+            self.con.commit()
+
+    def rollup_recent(self, from_ms: int | None = None, to_ms: int | None = None) -> None:
+        if not self.enabled or self.con is None:
+            return
+        current_ms = now_ms()
+        end_ms = to_ms or current_ms
+        start_ms = from_ms or (end_ms - max(2 * 60 * 60 * 1000, int(self.rollup_interval_sec * 2000)))
+        start_hour_ms = (start_ms // 3600000) * 3600000
+        updated_ms = current_ms
+        with self._lock:
+            rows = self.con.execute(
+                """
+                select
+                    (at_ms / 3600000) * 3600000 as hour_ms,
+                    device_id,
+                    max(display_name) as display_name,
+                    max(device_type) as device_type,
+                    count(*) as sample_count,
+                    sum(case when fix_mode = 4 then 1 else 0 end) as fix_fixed_count,
+                    sum(case when fix_mode = 3 then 1 else 0 end) as fix_float_count,
+                    sum(case when fix_mode is null or fix_mode not in (3, 4) then 1 else 0 end) as fix_no_count,
+                    sum(case when ntrip_status = 1 then 1 else 0 end) as ntrip_connected_count,
+                    sum(case when ntrip_status = 0 then 1 else 0 end) as ntrip_disconnected_count,
+                    min(accuracy_m) as accuracy_min_m,
+                    avg(accuracy_m) as accuracy_avg_m,
+                    max(accuracy_m) as accuracy_max_m,
+                    min(battery_percent) as battery_min_percent,
+                    avg(battery_percent) as battery_avg_percent,
+                    max(battery_percent) as battery_max_percent,
+                    max(uptime_sec) as uptime_max_sec
+                from telemetry_samples
+                where at_ms >= ? and at_ms <= ?
+                group by hour_ms, device_id
+                """,
+                (start_hour_ms, end_ms),
+            ).fetchall()
+            for row in rows:
+                reset_count = self.con.execute(
+                    """
+                    select count(*) from system_events
+                    where event_type = 'device_reset' and device_id = ? and at_ms >= ? and at_ms < ?
+                    """,
+                    (row["device_id"], row["hour_ms"], int(row["hour_ms"]) + 3600000),
+                ).fetchone()[0]
+                self.con.execute(
+                    """
+                    insert into hourly_device_metrics (
+                        hour_ms, device_id, display_name, device_type, sample_count, fix_fixed_count,
+                        fix_float_count, fix_no_count, ntrip_connected_count, ntrip_disconnected_count,
+                        accuracy_min_m, accuracy_avg_m, accuracy_max_m, battery_min_percent,
+                        battery_avg_percent, battery_max_percent, uptime_max_sec, reset_count, updated_ms
+                    )
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict(hour_ms, device_id) do update set
+                        display_name = excluded.display_name,
+                        device_type = excluded.device_type,
+                        sample_count = excluded.sample_count,
+                        fix_fixed_count = excluded.fix_fixed_count,
+                        fix_float_count = excluded.fix_float_count,
+                        fix_no_count = excluded.fix_no_count,
+                        ntrip_connected_count = excluded.ntrip_connected_count,
+                        ntrip_disconnected_count = excluded.ntrip_disconnected_count,
+                        accuracy_min_m = excluded.accuracy_min_m,
+                        accuracy_avg_m = excluded.accuracy_avg_m,
+                        accuracy_max_m = excluded.accuracy_max_m,
+                        battery_min_percent = excluded.battery_min_percent,
+                        battery_avg_percent = excluded.battery_avg_percent,
+                        battery_max_percent = excluded.battery_max_percent,
+                        uptime_max_sec = excluded.uptime_max_sec,
+                        reset_count = excluded.reset_count,
+                        updated_ms = excluded.updated_ms
+                    """,
+                    (
+                        row["hour_ms"],
+                        row["device_id"],
+                        row["display_name"],
+                        row["device_type"],
+                        row["sample_count"],
+                        row["fix_fixed_count"],
+                        row["fix_float_count"],
+                        row["fix_no_count"],
+                        row["ntrip_connected_count"],
+                        row["ntrip_disconnected_count"],
+                        row["accuracy_min_m"],
+                        row["accuracy_avg_m"],
+                        row["accuracy_max_m"],
+                        row["battery_min_percent"],
+                        row["battery_avg_percent"],
+                        row["battery_max_percent"],
+                        row["uptime_max_sec"],
+                        reset_count,
+                        updated_ms,
+                    ),
+                )
+
+            pair_rows = self.con.execute(
+                """
+                select
+                    (at_ms / 3600000) * 3600000 as hour_ms,
+                    device_id,
+                    peer_id,
+                    at_ms,
+                    safe_distance_m,
+                    raw_distance_m,
+                    uncertainty_m
+                from telemetry_samples
+                where at_ms >= ? and at_ms <= ? and peer_id is not null and peer_id != ''
+                order by hour_ms, device_id, peer_id, at_ms
+                """,
+                (start_hour_ms, end_ms),
+            ).fetchall()
+            pairs: dict[tuple[int, str, str], dict[str, Any]] = {}
+            for row in pair_rows:
+                key = (int(row["hour_ms"]), str(row["device_id"]), str(row["peer_id"]))
+                metric = pairs.setdefault(
+                    key,
+                    {
+                        "sample_count": 0,
+                        "closest_distance": None,
+                        "raw_distance": None,
+                        "uncertainty": None,
+                        "at_ms": None,
+                    },
+                )
+                metric["sample_count"] += 1
+                candidate = row["safe_distance_m"] if row["safe_distance_m"] is not None else row["raw_distance_m"]
+                if candidate is None:
+                    continue
+                if metric["closest_distance"] is None or candidate < metric["closest_distance"]:
+                    metric["closest_distance"] = candidate
+                    metric["raw_distance"] = row["raw_distance_m"]
+                    metric["uncertainty"] = row["uncertainty_m"]
+                    metric["at_ms"] = row["at_ms"]
+            for (hour_ms, device_id, peer_id), metric in pairs.items():
+                self.con.execute(
+                    """
+                    insert into hourly_pair_metrics (
+                        hour_ms, device_id, peer_id, closest_safe_distance_m, closest_raw_distance_m,
+                        closest_uncertainty_m, closest_at_ms, sample_count, updated_ms
+                    )
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict(hour_ms, device_id, peer_id) do update set
+                        closest_safe_distance_m = excluded.closest_safe_distance_m,
+                        closest_raw_distance_m = excluded.closest_raw_distance_m,
+                        closest_uncertainty_m = excluded.closest_uncertainty_m,
+                        closest_at_ms = excluded.closest_at_ms,
+                        sample_count = excluded.sample_count,
+                        updated_ms = excluded.updated_ms
+                    """,
+                    (
+                        hour_ms,
+                        device_id,
+                        peer_id,
+                        metric["closest_distance"],
+                        metric["raw_distance"],
+                        metric["uncertainty"],
+                        metric["at_ms"],
+                        metric["sample_count"],
+                        updated_ms,
+                    ),
+                )
+            self.con.commit()
+
+    def summary(self, range_ms: int, device_id: str = "") -> dict[str, Any]:
+        if not self.enabled or self.con is None:
+            return {"enabled": False}
+        end_ms = now_ms()
+        start_ms = end_ms - range_ms
+        self.rollup_recent(start_ms, end_ms)
+        filters = "where h.hour_ms >= ? and h.hour_ms <= ?"
+        params: list[Any] = [start_ms, end_ms]
+        if device_id:
+            filters += " and h.device_id = ?"
+            params.append(device_id)
+        with self._lock:
+            row = self.con.execute(
+                f"""
+                select
+                    coalesce(sum(sample_count), 0) as sample_count,
+                    coalesce(sum(fix_fixed_count), 0) as fix_fixed_count,
+                    coalesce(sum(fix_float_count), 0) as fix_float_count,
+                    coalesce(sum(fix_no_count), 0) as fix_no_count,
+                    coalesce(sum(ntrip_connected_count), 0) as ntrip_connected_count,
+                    coalesce(sum(ntrip_disconnected_count), 0) as ntrip_disconnected_count,
+                    min(accuracy_min_m) as accuracy_min_m,
+                    avg(accuracy_avg_m) as accuracy_avg_m,
+                    max(accuracy_max_m) as accuracy_max_m,
+                    sum(reset_count) as reset_count,
+                    max(uptime_max_sec) as uptime_max_sec
+                from hourly_device_metrics h
+                {filters}
+                """,
+                params,
+            ).fetchone()
+            closest = self.con.execute(
+                f"""
+                select p.* from hourly_pair_metrics p
+                join hourly_device_metrics h on h.hour_ms = p.hour_ms and h.device_id = p.device_id
+                {filters} and p.closest_safe_distance_m is not null
+                order by p.closest_safe_distance_m asc limit 1
+                """,
+                params,
+            ).fetchone()
+            last_sample = self.con.execute(
+                "select max(at_ms) from telemetry_samples where (? = '' or device_id = ?)",
+                (device_id, device_id),
+            ).fetchone()[0]
+            device_rows = self.con.execute(
+                """
+                select device_id, display_name, device_type, last_seen_ms from devices
+                where (? = '' or device_id = ?)
+                order by display_name collate nocase
+                """,
+                (device_id, device_id),
+            ).fetchall()
+        return {
+            "enabled": True,
+            "databasePath": str(self.path),
+            "range_ms": range_ms,
+            "from_ms": start_ms,
+            "to_ms": end_ms,
+            "devices": [dict(item) for item in device_rows],
+            "sample_count": int(row["sample_count"] or 0),
+            "fix_fixed_count": int(row["fix_fixed_count"] or 0),
+            "fix_float_count": int(row["fix_float_count"] or 0),
+            "fix_no_count": int(row["fix_no_count"] or 0),
+            "ntrip_connected_count": int(row["ntrip_connected_count"] or 0),
+            "ntrip_disconnected_count": int(row["ntrip_disconnected_count"] or 0),
+            "accuracy_min_m": row["accuracy_min_m"],
+            "accuracy_avg_m": row["accuracy_avg_m"],
+            "accuracy_max_m": row["accuracy_max_m"],
+            "reset_count": int(row["reset_count"] or 0),
+            "uptime_max_sec": row["uptime_max_sec"],
+            "last_sample_ms": last_sample,
+            "closest": dict(closest) if closest is not None else None,
+        }
+
+    def hourly(self, from_ms: int, to_ms: int, device_id: str = "") -> dict[str, Any]:
+        if not self.enabled or self.con is None:
+            return {"enabled": False, "device_metrics": [], "pair_metrics": []}
+        self.rollup_recent(from_ms, to_ms)
+        params: list[Any] = [from_ms, to_ms]
+        device_filter = ""
+        if device_id:
+            device_filter = " and device_id = ?"
+            params.append(device_id)
+        with self._lock:
+            device_rows = self.con.execute(
+                f"""
+                select * from hourly_device_metrics
+                where hour_ms >= ? and hour_ms <= ?{device_filter}
+                order by hour_ms asc, display_name collate nocase
+                """,
+                params,
+            ).fetchall()
+            pair_rows = self.con.execute(
+                f"""
+                select * from hourly_pair_metrics
+                where hour_ms >= ? and hour_ms <= ?{device_filter}
+                order by hour_ms asc, device_id collate nocase, peer_id collate nocase
+                """,
+                params,
+            ).fetchall()
+        return {
+            "enabled": True,
+            "from_ms": from_ms,
+            "to_ms": to_ms,
+            "device_metrics": [dict(row) for row in device_rows],
+            "pair_metrics": [dict(row) for row in pair_rows],
+        }
+
+    def events(self, from_ms: int, to_ms: int, device_id: str = "", limit: int = 200) -> dict[str, Any]:
+        if not self.enabled or self.con is None:
+            return {"enabled": False, "events": []}
+        limit = max(1, min(int(limit), 500))
+        params: list[Any] = [from_ms, to_ms]
+        device_filter = ""
+        if device_id:
+            device_filter = " and device_id = ?"
+            params.append(device_id)
+        params.append(limit)
+        with self._lock:
+            rows = self.con.execute(
+                f"""
+                select * from system_events
+                where at_ms >= ? and at_ms <= ?{device_filter}
+                order by at_ms desc
+                limit ?
+                """,
+                params,
+            ).fetchall()
+        return {"enabled": True, "from_ms": from_ms, "to_ms": to_ms, "events": [dict(row) for row in rows]}
+
+    def samples(self, from_ms: int, to_ms: int, device_id: str = "", limit: int = 500) -> dict[str, Any]:
+        if not self.enabled or self.con is None:
+            return {"enabled": False, "samples": []}
+        limit = max(1, min(int(limit), 500))
+        params: list[Any] = [from_ms, to_ms]
+        device_filter = ""
+        if device_id:
+            device_filter = " and device_id = ?"
+            params.append(device_id)
+        params.append(limit)
+        with self._lock:
+            rows = self.con.execute(
+                f"""
+                select * from telemetry_samples
+                where at_ms >= ? and at_ms <= ?{device_filter}
+                order by at_ms desc
+                limit ?
+                """,
+                params,
+            ).fetchall()
+        return {"enabled": True, "from_ms": from_ms, "to_ms": to_ms, "samples": [dict(row) for row in rows]}
+
+
 class DashboardState:
     def __init__(self, config: dict[str, Any]):
         self.config = config
@@ -332,6 +1054,8 @@ class DashboardState:
         self._events: list[dict[str, Any]] = []
         self.started_ms = now_ms()
         self.mbtiles = discover_mbtiles()
+        self.telemetry_logger = TelemetryLogger(config)
+        self.telemetry_logger.start()
 
     def configured_rover_name(self, *keys: str) -> str:
         names = self.config.get("dashboard", {}).get("roverNames", {})
@@ -360,6 +1084,7 @@ class DashboardState:
             self._events = self._events[-80:]
             self._version += 1
             self._condition.notify_all()
+        self.telemetry_logger.log_event(event_type, message, data)
 
     def update_from_mqtt(
         self,
@@ -437,8 +1162,22 @@ class DashboardState:
             self._version += 1
             self._condition.notify_all()
 
+            logged_display_name = record.display_name or device_id
+
         if topic in {"batch_ds", "info/mcu"} or topic.startswith(("batch_ds/", "ds/")):
             logging.debug("MQTT %s from %s: %s", topic, device_id, decoded)
+
+        if info_payload is None:
+            self.telemetry_logger.log_sample(
+                device_id=device_id,
+                display_name=logged_display_name,
+                payload=payload,
+                source_type="mqtt",
+                topic=topic,
+                source_host=source_host,
+                mqtt_client_id=client_id,
+                username=username,
+            )
 
     def update_from_peer_udp(self, payload: dict[str, Any], source_host: str, max_age_sec: float) -> None:
         if payload.get("schema") != "crane-rover-peer-v1":
@@ -463,6 +1202,14 @@ class DashboardState:
             self._peers[device_id] = peer
             self._version += 1
             self._condition.notify_all()
+
+        self.telemetry_logger.log_sample(
+            device_id=device_id,
+            display_name=str(peer.get("display_name") or device_id),
+            payload=peer,
+            source_type="udp_peer",
+            source_host=source_host,
+        )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -687,6 +1434,12 @@ def handle_mqtt_client(sock: socket.socket, client_address: tuple[str, int], bro
                 logging.debug("Ignoring unsupported MQTT packet type %s from %s", packet_type, ctx.source_host)
     except Exception as exc:
         logging.debug("MQTT client closed from %s: %s", ctx.source_host, exc)
+        broker.state.telemetry_logger.log_event(
+            "mqtt_client_closed",
+            f"MQTT client closed from {ctx.source_host}",
+            {"error": str(exc), "client_id": ctx.client_id},
+            severity="debug",
+        )
     finally:
         try:
             sock.close()
@@ -739,6 +1492,9 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/state":
             self.send_json(self.dashboard_state.snapshot())
             return
+        if parsed.path.startswith("/api/logs/"):
+            self.handle_logs_api(parsed.path, parse_qs(parsed.query))
+            return
         if parsed.path == "/events":
             self.handle_events()
             return
@@ -747,7 +1503,29 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
             return
         self.serve_static(parsed.path)
 
-    def send_json(self, payload: dict[str, Any]) -> None:
+    def handle_logs_api(self, path: str, query: dict[str, list[str]]) -> None:
+        logger = self.dashboard_state.telemetry_logger
+        range_ms = parse_range_ms(first_query_value(query, "range"), 24 * 60 * 60 * 1000)
+        end_ms = parse_query_ms(first_query_value(query, "to"), now_ms())
+        start_ms = parse_query_ms(first_query_value(query, "from"), end_ms - range_ms)
+        device_id = first_query_value(query, "device_id") or ""
+        limit = int(finite_int(first_query_value(query, "limit")) or 200)
+
+        if path == "/api/logs/summary":
+            self.send_json(logger.summary(range_ms, device_id))
+            return
+        if path == "/api/logs/hourly":
+            self.send_json(logger.hourly(start_ms, end_ms, device_id))
+            return
+        if path == "/api/logs/events":
+            self.send_json(logger.events(start_ms, end_ms, device_id, limit))
+            return
+        if path == "/api/logs/samples":
+            self.send_json(logger.samples(start_ms, end_ms, device_id, limit))
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def send_json(self, payload: Any) -> None:
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")

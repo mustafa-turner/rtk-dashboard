@@ -99,6 +99,14 @@ udpPeers:
   port: 5005
   maxAgeSec: 5
 
+logging:
+  enabled: true
+  databasePath: data/rtk-dashboard.sqlite
+  rawRetentionDays: 30
+  summaryRetentionDays: 0
+  sampleMinIntervalSec: 2
+  rollupIntervalSec: 300
+
 dashboard:
   title: Crane Rover Dashboard
   roverAntennaOffset:
@@ -117,6 +125,9 @@ dashboard:
 - `mqtt.host` / `mqtt.port`: where the local MQTT listener binds
 - `http.host` / `http.port`: where the dashboard web server binds
 - `udpPeers.enabled`: enable or disable peer discovery traffic
+- `logging.enabled`: enable or disable the SQLite history database
+- `logging.rawRetentionDays`: cap detailed sample storage; hourly summaries are
+  retained indefinitely when `summaryRetentionDays` is `0`
 - `dashboard.title`: title shown in the browser
 - `dashboard.defaultCenter`: default map center and zoom
 - `dashboard.roverNames`: manual display names for device IDs, client IDs,
@@ -145,6 +156,29 @@ You should see a rover appear in the dashboard.
 Start the dashboard, then update the rover MQTT settings to use this machine as
 the broker on port `1883`. Once telemetry starts publishing to `batch_ds`, the
 dashboard should update automatically.
+
+## Logging History
+
+When `logging.enabled` is true, the dashboard writes telemetry history to a
+local SQLite database. The default `data/rtk-dashboard.sqlite` path is relative
+to this repository.
+
+The logger keeps raw payload samples for `rawRetentionDays` and keeps hourly
+summary rows indefinitely when `summaryRetentionDays` is `0`. With the current
+rover publish interval of about 2 seconds, expect roughly `40-120 MB` per day
+per device for raw samples, depending on payload size. The default 30 day
+retention is comfortable on a 1 TB SSD, and hourly summaries are tiny.
+
+The Logging tab reads these local API endpoints:
+
+- `/api/logs/summary?range=24h|7d|30d&device_id=...`
+- `/api/logs/hourly?from=...&to=...&device_id=...`
+- `/api/logs/events?from=...&to=...&device_id=...`
+- `/api/logs/samples?from=...&to=...&device_id=...&limit=500`
+
+The raw sample table stores the full JSON payload, so future devices such as
+tide sensors or truck trackers can be logged before the dashboard gets
+device-specific charts.
 
 ## Rover Config
 
@@ -333,6 +367,8 @@ The dashboard displays these existing Blynk-style telemetry fields:
 - `nearest_peer_accuracy_m`
 - `nearest_peer_fix_mode`
 - `nearest_peer_id`
+- optional uptime fields such as `uptime_sec`, `app_uptime_sec`, or
+  `device_uptime_sec`
 
 It also accepts optional `device_id` or `deviceId` in the payload, plus
 `batch_ds/<device_id>` topic variants if you later move each rover to its own
