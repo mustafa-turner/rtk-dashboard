@@ -12,6 +12,7 @@ const state = {
   currentView: "live",
   logs: null,
   logsFetchInFlight: false,
+  liveSamplesEnabled: false,
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -79,6 +80,20 @@ function dateTimeLabel(ms) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+  });
+}
+
+function timeLabel(ms) {
+  const number = Number(ms);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "-";
+  }
+  return new Date(number).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   });
 }
 
@@ -1133,13 +1148,19 @@ async function refreshLogs() {
   const deviceId = byId("log-device")?.value || "";
   const params = new URLSearchParams({ range, from: String(from), to: String(to) });
   if (deviceId) params.set("device_id", deviceId);
+  const sampleParams = new URLSearchParams({ from: String(to - 5 * 60 * 1000), to: String(to), limit: "80" });
+  if (deviceId) sampleParams.set("device_id", deviceId);
   try {
-    const [summary, hourly, events] = await Promise.all([
+    const requests = [
       fetchJson(`/api/logs/summary?${params.toString()}`),
       fetchJson(`/api/logs/hourly?${params.toString()}`),
       fetchJson(`/api/logs/events?${params.toString()}&limit=80`),
-    ]);
-    state.logs = { summary, hourly, events };
+    ];
+    if (state.liveSamplesEnabled) {
+      requests.push(fetchJson(`/api/logs/samples?${sampleParams.toString()}`));
+    }
+    const [summary, hourly, events, samples] = await Promise.all(requests);
+    state.logs = { summary, hourly, events, samples: samples || state.logs?.samples || null };
     renderLogs();
   } finally {
     state.logsFetchInFlight = false;
@@ -1211,60 +1232,173 @@ function groupHourlyDeviceRows(rows) {
   return Array.from(grouped.values()).sort((a, b) => a.hour_ms - b.hour_ms);
 }
 
-function renderBars(el, rows, valueGetter, { inverse = false, suffix = "" } = {}) {
-  if (!rows.length) {
-    el.innerHTML = `<div class="spark-empty">No hourly data yet</div>`;
-    return;
-  }
-  const values = rows.map(valueGetter).filter((value) => Number.isFinite(value));
-  if (!values.length) {
-    el.innerHTML = `<div class="spark-empty">No matching values yet</div>`;
-    return;
-  }
-  const max = Math.max(...values, 1);
-  const min = Math.min(...values, 0);
-  el.innerHTML = rows
+function buildLinePoints(rows, valueGetter) {
+  return rows
     .map((row) => {
       const value = valueGetter(row);
-      const normalized = Number.isFinite(value)
-        ? inverse
-          ? 1 - (value - min) / Math.max(1, max - min)
-          : value / max
-        : 0;
-      const height = Math.max(2, Math.round(normalized * 100));
-      const label = Number.isFinite(value) ? `${value.toFixed(value < 10 ? 2 : 0)}${suffix}` : "-";
-      return `<div class="spark-bar" title="${escapeHtml(`${dateTimeLabel(row.hour_ms)}: ${label}`)}" style="height: ${height}%"></div>`;
+      const time = Number(row.hour_ms ?? row.closest_at_ms ?? row.at_ms);
+      if (!Number.isFinite(time) || !Number.isFinite(value)) return null;
+      return { row, time, value };
     })
+    .filter(Boolean)
+    .sort((a, b) => a.time - b.time);
+}
+
+function linePath(points, width, height, padding, minValue, maxValue) {
+  const xMin = points[0].time;
+  const xMax = points[points.length - 1].time;
+  const xSpan = Math.max(1, xMax - xMin);
+  const ySpan = Math.max(1, maxValue - minValue);
+  return points
+    .map((point, index) => {
+      const x = padding.left + ((point.time - xMin) / xSpan) * (width - padding.left - padding.right);
+      const y = padding.top + (1 - (point.value - minValue) / ySpan) * (height - padding.top - padding.bottom);
+      point.x = x;
+      point.y = y;
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+}
+
+function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490", digits = 1 } = {}) {
+  const points = buildLinePoints(rows, valueGetter);
+  if (!points.length) {
+    el.innerHTML = `<div class="chart-empty">No matching values yet</div>`;
+    return;
+  }
+  const width = 520;
+  const height = 210;
+  const padding = { top: 18, right: 18, bottom: 28, left: 42 };
+  const values = points.map((point) => point.value);
+  let minValue = Math.min(...values);
+  let maxValue = Math.max(...values);
+  if (minValue === maxValue) {
+    minValue = Math.max(0, minValue - 1);
+    maxValue += 1;
+  } else {
+    const pad = (maxValue - minValue) * 0.12;
+    minValue = Math.max(0, minValue - pad);
+    maxValue += pad;
+  }
+  const path = linePath(points, width, height, padding, minValue, maxValue);
+  const fillPath = `${path} L ${points[points.length - 1].x.toFixed(2)} ${height - padding.bottom} L ${points[0].x.toFixed(2)} ${height - padding.bottom} Z`;
+  const pointDots = points
+    .map(
+      (point, index) => `
+        <circle
+          class="chart-point"
+          cx="${point.x.toFixed(2)}"
+          cy="${point.y.toFixed(2)}"
+          r="8"
+          data-index="${index}"
+          tabindex="0"
+        ></circle>
+      `
+    )
     .join("");
+
+  el.innerHTML = `
+    <svg class="line-chart-svg" viewBox="0 0 ${width} ${height}" role="img" style="--chart-color: ${color}">
+      <line class="chart-grid-line" x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}"></line>
+      <line class="chart-grid-line" x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}"></line>
+      <path class="chart-area" d="${fillPath}"></path>
+      <path class="chart-line" d="${path}"></path>
+      ${pointDots}
+    </svg>
+    <div class="chart-tooltip" hidden></div>
+  `;
+
+  const tooltip = el.querySelector(".chart-tooltip");
+  const showTooltip = (point) => {
+    tooltip.hidden = false;
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(Number(point.value).toFixed(digits) + suffix)}</strong>
+      <span>${escapeHtml(timeLabel(point.time))}</span>
+    `;
+    tooltip.style.left = `${(point.x / width) * 100}%`;
+    tooltip.style.top = `${(point.y / height) * 100}%`;
+  };
+  el.querySelectorAll(".chart-point").forEach((dot) => {
+    const point = points[Number(dot.dataset.index)];
+    dot.addEventListener("mouseenter", () => showTooltip(point));
+    dot.addEventListener("focus", () => showTooltip(point));
+  });
+  el.addEventListener("mouseleave", () => {
+    tooltip.hidden = true;
+  });
 }
 
 function renderLogCharts(hourly) {
   const deviceRows = groupHourlyDeviceRows(hourly?.device_metrics || []);
   const pairRows = (hourly?.pair_metrics || []).filter((row) => row.closest_safe_distance_m !== null || row.closest_raw_distance_m !== null);
-  renderBars(
-    byId("distance-bars"),
+  renderLineChart(
+    byId("distance-chart"),
     pairRows,
     (row) => Number(row.closest_safe_distance_m ?? row.closest_raw_distance_m),
-    { inverse: true, suffix: " m" }
+    { suffix: " m", color: "#c2410c", digits: 2 }
   );
-  renderBars(
-    byId("rtk-bars"),
+  renderLineChart(
+    byId("rtk-chart"),
     deviceRows,
     (row) => {
       const total = Number(row.sample_count) || 0;
       return total > 0 ? ((Number(row.fix_fixed_count) || 0) / total) * 100 : NaN;
     },
-    { suffix: "%" }
+    { suffix: "%", color: "#0f8b5f", digits: 0 }
   );
-  renderBars(
-    byId("ntrip-bars"),
+  renderLineChart(
+    byId("ntrip-chart"),
     deviceRows,
     (row) => {
       const total = (Number(row.ntrip_connected_count) || 0) + (Number(row.ntrip_disconnected_count) || 0);
       return total > 0 ? ((Number(row.ntrip_connected_count) || 0) / total) * 100 : NaN;
     },
-    { suffix: "%" }
+    { suffix: "%", color: "#0f7490", digits: 0 }
   );
+}
+
+function sampleValue(sample, key, digits = 1, suffix = "") {
+  return numeric(sample?.[key], digits, suffix);
+}
+
+function renderLiveSamples(samplesPayload) {
+  const panel = byId("live-samples-panel");
+  const list = byId("live-samples");
+  panel.hidden = !state.liveSamplesEnabled;
+  if (!state.liveSamplesEnabled) return;
+
+  const samples = samplesPayload?.samples || [];
+  if (!samples.length) {
+    list.innerHTML = `<div class="log-event-empty">Waiting for logged samples</div>`;
+    return;
+  }
+
+  list.innerHTML = `
+    <div class="sample-table">
+      <div class="sample-row sample-head">
+        <span>Time</span>
+        <span>Device</span>
+        <span>Fix</span>
+        <span>Distance</span>
+        <span>Accuracy</span>
+        <span>Battery</span>
+      </div>
+      ${samples
+        .map(
+          (sample) => `
+            <div class="sample-row">
+              <span>${escapeHtml(timeLabel(sample.at_ms))}</span>
+              <span>${escapeHtml(sample.display_name || sample.device_id || "-")}</span>
+              <span>${escapeHtml(fixLabels[sample.fix_mode] || valueOrDash(sample.fix_mode))}</span>
+              <span>${escapeHtml(sampleValue(sample, "safe_distance_m", 2, " m"))}</span>
+              <span>${escapeHtml(sampleValue(sample, "accuracy_m", 3, " m"))}</span>
+              <span>${escapeHtml(sampleValue(sample, "battery_percent", 1, "%"))}</span>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function renderLogEvents(eventsPayload) {
@@ -1294,14 +1428,16 @@ function renderLogs() {
   const logs = state.logs;
   if (!logs?.summary?.enabled) {
     byId("log-metric-grid").innerHTML = metricCard("Logging", "Disabled", "Enable logging in config.yaml");
-    byId("distance-bars").innerHTML = `<div class="spark-empty">Logging is disabled</div>`;
-    byId("rtk-bars").innerHTML = `<div class="spark-empty">Logging is disabled</div>`;
-    byId("ntrip-bars").innerHTML = `<div class="spark-empty">Logging is disabled</div>`;
+    byId("distance-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
+    byId("rtk-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
+    byId("ntrip-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
+    byId("live-samples-panel").hidden = true;
     byId("log-events").innerHTML = `<div class="log-event-empty">Logging is disabled</div>`;
     return;
   }
   renderLogMetrics(logs.summary);
   renderLogCharts(logs.hourly);
+  renderLiveSamples(logs.samples);
   renderLogEvents(logs.events);
 }
 
@@ -1371,6 +1507,10 @@ async function boot() {
   byId("log-range").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
   byId("log-device").addEventListener("change", () => refreshLogs().catch((error) => console.error(error)));
   byId("refresh-logs").addEventListener("click", () => refreshLogs().catch((error) => console.error(error)));
+  byId("live-samples-toggle").addEventListener("change", (event) => {
+    state.liveSamplesEnabled = Boolean(event.target.checked);
+    refreshLogs().catch((error) => console.error(error));
+  });
 
   const events = new EventSource("/events");
   events.onopen = () => {
@@ -1399,7 +1539,7 @@ async function boot() {
     if (state.currentView === "logging") {
       refreshLogs().catch((error) => console.error("Log refresh failed", error));
     }
-  }, 30000);
+  }, 2000);
 }
 
 boot().catch((error) => {

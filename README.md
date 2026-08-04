@@ -176,6 +176,11 @@ The Logging tab reads these local API endpoints:
 - `/api/logs/events?from=...&to=...&device_id=...`
 - `/api/logs/samples?from=...&to=...&device_id=...&limit=500`
 
+While the Logging tab is open, it refreshes automatically. Turn on `Live
+samples` to watch the most recent logged records, which is useful when devices
+publish every few seconds. The trend charts show time and value details on
+hover.
+
 The raw sample table stores the full JSON payload, so future devices such as
 tide sensors or truck trackers can be logged before the dashboard gets
 device-specific charts.
