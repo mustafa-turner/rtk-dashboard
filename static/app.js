@@ -1249,7 +1249,7 @@ function buildLinePoints(rows, valueGetter) {
   return rows
     .map((row) => {
       const value = valueGetter(row);
-      const time = Number(row.at_ms ?? row.closest_at_ms ?? row.hour_ms);
+      const time = Number(row.at_ms ?? row.hour_ms ?? row.closest_at_ms);
       if (!Number.isFinite(time) || !Number.isFinite(value)) return null;
       return { row, time, value };
     })
