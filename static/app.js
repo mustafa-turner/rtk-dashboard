@@ -1391,8 +1391,8 @@ function renderLogCharts(hourly) {
   }
 
   byId("distance-chart-title").textContent = "Closest Distance By Hour";
-  byId("rtk-chart-title").textContent = "RTK Fixed Rate";
-  byId("ntrip-chart-title").textContent = "Device Connection";
+  byId("rtk-chart-title").textContent = "Avg. Hourly RTK Fixed Rate";
+  byId("ntrip-chart-title").textContent = "Avg. Hourly Device Connection Rate";
 
   const deviceRows = groupHourlyDeviceRows(hourly?.device_metrics || []);
   const pairRows = (hourly?.pair_metrics || []).filter((row) => row.closest_safe_distance_m !== null || row.closest_raw_distance_m !== null);
