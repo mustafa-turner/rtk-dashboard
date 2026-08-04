@@ -1257,20 +1257,24 @@ function buildLinePoints(rows, valueGetter) {
     .sort((a, b) => a.time - b.time);
 }
 
-function linePath(points, width, height, padding, minValue, maxValue) {
+function linePath(points, width, height, padding, minValue, maxValue, mode = "linear") {
   const xMin = points[0].time;
   const xMax = points[points.length - 1].time;
   const xSpan = Math.max(1, xMax - xMin);
   const ySpan = Math.max(1, maxValue - minValue);
-  return points
-    .map((point, index) => {
-      const x = padding.left + ((point.time - xMin) / xSpan) * (width - padding.left - padding.right);
-      const y = padding.top + (1 - (point.value - minValue) / ySpan) * (height - padding.top - padding.bottom);
-      point.x = x;
-      point.y = y;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
+  points.forEach((point) => {
+    point.x = padding.left + ((point.time - xMin) / xSpan) * (width - padding.left - padding.right);
+    point.y = padding.top + (1 - (point.value - minValue) / ySpan) * (height - padding.top - padding.bottom);
+  });
+  if (mode === "step") {
+    return points
+      .map((point, index) => {
+        if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+        return `H ${point.x.toFixed(2)} V ${point.y.toFixed(2)}`;
+      })
+      .join(" ");
+  }
+  return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
 }
 
 function compactTimeLabel(ms) {
@@ -1281,16 +1285,26 @@ function compactTimeLabel(ms) {
   return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" });
 }
 
-function chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits) {
+function chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits, yAxisLabels = null) {
   const valueMid = (minValue + maxValue) / 2;
-  const yLabels = [
-    [maxValue, padding.top],
-    [valueMid, padding.top + (height - padding.top - padding.bottom) / 2],
-    [minValue, height - padding.bottom],
-  ]
+  const yItems =
+    Array.isArray(yAxisLabels) && yAxisLabels.length
+      ? yAxisLabels.map((item) => {
+          const value = Number(item.value);
+          const y =
+            padding.top +
+            (1 - (value - minValue) / Math.max(1, maxValue - minValue)) * (height - padding.top - padding.bottom);
+          return [item.label, y];
+        })
+      : [
+          [Number(maxValue).toFixed(digits) + suffix, padding.top],
+          [Number(valueMid).toFixed(digits) + suffix, padding.top + (height - padding.top - padding.bottom) / 2],
+          [Number(minValue).toFixed(digits) + suffix, height - padding.bottom],
+        ];
+  const yLabels = yItems
     .map(
-      ([value, y]) => `
-        <text class="chart-axis-label y-axis-label" x="${padding.left - 12}" y="${Number(y).toFixed(1)}">${escapeHtml(Number(value).toFixed(digits) + suffix)}</text>
+      ([label, y]) => `
+        <text class="chart-axis-label y-axis-label" x="${padding.left - 12}" y="${Number(y).toFixed(1)}">${escapeHtml(label)}</text>
       `
     )
     .join("");
@@ -1308,7 +1322,17 @@ function renderLineChart(
   el,
   rows,
   valueGetter,
-  { suffix = "", color = "#0f7490", digits = 1, minScale = null, maxScale = null } = {}
+  {
+    suffix = "",
+    color = "#0f7490",
+    digits = 1,
+    minScale = null,
+    maxScale = null,
+    mode = "linear",
+    yAxisLabels = null,
+    valueFormatter = null,
+    leftPadding = 64,
+  } = {}
 ) {
   const points = buildLinePoints(rows, valueGetter);
   if (!points.length) {
@@ -1317,7 +1341,7 @@ function renderLineChart(
   }
   const width = 520;
   const height = 236;
-  const padding = { top: 18, right: 22, bottom: 42, left: 64 };
+  const padding = { top: 18, right: 22, bottom: 42, left: leftPadding };
   const values = points.map((point) => point.value);
   let minValue = Math.min(...values);
   let maxValue = Math.max(...values);
@@ -1339,9 +1363,9 @@ function renderLineChart(
       maxValue += pad;
     }
   }
-  const path = linePath(points, width, height, padding, minValue, maxValue);
+  const path = linePath(points, width, height, padding, minValue, maxValue, mode);
   const fillPath = `${path} L ${points[points.length - 1].x.toFixed(2)} ${height - padding.bottom} L ${points[0].x.toFixed(2)} ${height - padding.bottom} Z`;
-  const axisLabels = chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits);
+  const axisLabels = chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits, yAxisLabels);
 
   el.innerHTML = `
     <svg class="line-chart-svg" viewBox="0 0 ${width} ${height}" role="img" style="--chart-color: ${color}">
@@ -1364,8 +1388,10 @@ function renderLineChart(
   const showTooltip = (point) => {
     tooltip.hidden = false;
     hoverLine.hidden = false;
+    const displayValue =
+      typeof valueFormatter === "function" ? valueFormatter(point.value, point.row) : Number(point.value).toFixed(digits) + suffix;
     tooltip.innerHTML = `
-      <strong>${escapeHtml(Number(point.value).toFixed(digits) + suffix)}</strong>
+      <strong>${escapeHtml(displayValue)}</strong>
       <span>${escapeHtml(timeLabel(point.time))}</span>
     `;
     tooltip.style.left = `${(point.x / width) * 100}%`;
@@ -1435,13 +1461,35 @@ function renderLiveSampleCharts(samplesPayload) {
     byId("rtk-chart"),
     samples,
     (row) => (Number(row.fix_mode) === 4 ? 100 : 0),
-    { suffix: "%", color: "#0f8b5f", digits: 0, minScale: 0, maxScale: 100 }
+    {
+      color: "#0f8b5f",
+      minScale: 0,
+      maxScale: 100,
+      mode: "step",
+      leftPadding: 96,
+      yAxisLabels: [
+        { value: 100, label: "Fixed" },
+        { value: 0, label: "Not Fixed" },
+      ],
+      valueFormatter: (value) => (Number(value) >= 50 ? "Fixed" : "Not Fixed"),
+    }
   );
   renderLineChart(
     byId("ntrip-chart"),
     statusRows,
     (row) => Number(row.connected_percent),
-    { suffix: "%", color: "#0f7490", digits: 0, minScale: 0, maxScale: 100 }
+    {
+      color: "#0f7490",
+      minScale: 0,
+      maxScale: 100,
+      mode: "step",
+      leftPadding: 108,
+      yAxisLabels: [
+        { value: 100, label: "Connected" },
+        { value: 0, label: "Disconnected" },
+      ],
+      valueFormatter: (value) => (Number(value) >= 50 ? "Connected" : "Disconnected"),
+    }
   );
 }
 
