@@ -183,7 +183,8 @@ publish cadence. Moving across a chart shows the nearest timestamp and value.
 
 The raw sample table stores the full JSON payload, so future devices such as
 tide sensors or truck trackers can be logged before the dashboard gets
-device-specific charts.
+device-specific charts. The logger also records telemetry disconnect and
+reconnect events so spotty network periods can be reviewed later.
 
 ## Rover Config
 

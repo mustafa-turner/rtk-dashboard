@@ -13,6 +13,8 @@ const state = {
   logs: null,
   logsFetchInFlight: false,
   logRange: "24h",
+  snapshotServerNowMs: 0,
+  snapshotLocalReceivedMs: 0,
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -107,11 +109,15 @@ function percent(numerator, denominator, digits = 0) {
 }
 
 function snapshotNowMs(snapshot) {
-  const serverNowMs = Number(snapshot?.server?.now_ms);
-  if (!Number.isFinite(serverNowMs)) {
+  const serverNowMs = Number(snapshot?.server?.now_ms) || state.snapshotServerNowMs;
+  const localReceivedMs = Number(state.snapshotLocalReceivedMs);
+  if (!Number.isFinite(serverNowMs) || serverNowMs <= 0) {
     return Date.now();
   }
-  return serverNowMs;
+  if (!Number.isFinite(localReceivedMs) || localReceivedMs <= 0) {
+    return serverNowMs;
+  }
+  return serverNowMs + Math.max(0, Date.now() - localReceivedMs);
 }
 
 function snapshotVersion(snapshot) {
@@ -131,7 +137,6 @@ function deviceTelemetrySeenMs(device) {
   return (
     Number(device?.last_telemetry_seen_ms) ||
     Number(device?.last_position_seen_ms) ||
-    Number(device?.last_seen_ms) ||
     0
   );
 }
@@ -161,7 +166,7 @@ function roverIsWaitingForPosition(rover, snapshot) {
 }
 
 function deviceIsDisconnected(device, snapshot) {
-  const ageMs = ageMsFromLastSeen(device?.last_seen_ms, snapshot);
+  const ageMs = ageMsFromLastSeen(deviceTelemetrySeenMs(device), snapshot);
   return ageMs === null || ageMs > ROVER_DISCONNECTED_MS;
 }
 
@@ -625,7 +630,7 @@ function updateHeader(snapshot) {
     liveLabel.textContent = "Waiting";
     return;
   }
-  const ageMs = nowMs - selected.last_seen_ms;
+  const ageMs = nowMs - deviceTelemetrySeenMs(selected);
   if (Number.isFinite(ageMs) && ageMs <= ROVER_DISCONNECTED_MS) {
     liveDot.classList.add("live");
     liveLabel.textContent = "Live";
@@ -1398,9 +1403,10 @@ function renderLogCharts(hourly) {
 
 function renderLiveSampleCharts(samplesPayload) {
   const samples = samplesPayload?.samples || [];
+  const statusRows = buildDeviceStatusRows(samples, state.logs?.events?.events || []);
   byId("distance-chart-title").textContent = "Live Distance";
   byId("rtk-chart-title").textContent = "Live RTK Fixed";
-  byId("ntrip-chart-title").textContent = "Live NTRIP Connected";
+  byId("ntrip-chart-title").textContent = "Live Device Status";
   renderLineChart(
     byId("distance-chart"),
     samples,
@@ -1415,10 +1421,51 @@ function renderLiveSampleCharts(samplesPayload) {
   );
   renderLineChart(
     byId("ntrip-chart"),
-    samples,
-    (row) => (Number(row.ntrip_status) === 1 ? 100 : 0),
+    statusRows,
+    (row) => Number(row.connected_percent),
     { suffix: "%", color: "#0f7490", digits: 0 }
   );
+}
+
+function buildDeviceStatusRows(samples, events) {
+  const selected = selectedDevice();
+  const deviceId = selected?.device_id || selectedLogDeviceId();
+  const rows = [];
+
+  samples
+    .filter((sample) => !deviceId || sample.device_id === deviceId)
+    .forEach((sample) => {
+      const atMs = Number(sample.at_ms);
+      if (Number.isFinite(atMs)) {
+        rows.push({ at_ms: atMs, connected_percent: 100 });
+      }
+    });
+
+  events
+    .filter((event) => !deviceId || event.device_id === deviceId)
+    .forEach((event) => {
+      const atMs = Number(event.at_ms);
+      if (!Number.isFinite(atMs)) return;
+      if (event.event_type === "device_disconnected") {
+        rows.push({ at_ms: atMs, connected_percent: 0 });
+      } else if (event.event_type === "device_reconnected") {
+        rows.push({ at_ms: atMs, connected_percent: 100 });
+      }
+    });
+
+  const latestSampleMs = Math.max(0, ...rows.filter((row) => row.connected_percent === 100).map((row) => row.at_ms));
+  if (latestSampleMs > 0 && Date.now() - latestSampleMs > ROVER_DISCONNECTED_MS) {
+    rows.push({ at_ms: latestSampleMs + ROVER_DISCONNECTED_MS, connected_percent: 0 });
+  }
+
+  if (selected) {
+    rows.push({
+      at_ms: Date.now(),
+      connected_percent: deviceIsDisconnected(selected, state.data) ? 0 : 100,
+    });
+  }
+
+  return rows.sort((a, b) => a.at_ms - b.at_ms);
 }
 
 function renderLogEvents(eventsPayload) {
@@ -1462,6 +1509,8 @@ function renderLogs() {
 function render(snapshot) {
   state.lastVersion = Math.max(state.lastVersion, snapshotVersion(snapshot));
   state.data = snapshot;
+  state.snapshotServerNowMs = Number(snapshot?.server?.now_ms) || Date.now();
+  state.snapshotLocalReceivedMs = Date.now();
   ensureSelectedDevice(snapshot);
   const selected = selectedDevice();
   const safetyRovers = buildSafetyRovers(selected, snapshot);

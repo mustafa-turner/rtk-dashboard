@@ -1054,10 +1054,41 @@ class DashboardState:
         self._devices: dict[str, DeviceRecord] = {}
         self._peers: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
+        self._device_connection_state: dict[str, bool] = {}
         self.started_ms = now_ms()
         self.mbtiles = discover_mbtiles()
         self.telemetry_logger = TelemetryLogger(config)
         self.telemetry_logger.start()
+        self.start_connection_monitor()
+
+    def start_connection_monitor(self) -> None:
+        thread = threading.Thread(target=self._monitor_device_connections, name="device-connection-monitor", daemon=True)
+        thread.start()
+
+    def _monitor_device_connections(self) -> None:
+        while True:
+            time.sleep(1)
+            current_ms = now_ms()
+            disconnected: list[tuple[str, str, int]] = []
+            with self._condition:
+                for device_id, record in self._devices.items():
+                    last_telemetry_ms = int(record.last_telemetry_seen_ms or record.last_position_seen_ms or 0)
+                    if not last_telemetry_ms:
+                        continue
+                    is_connected = current_ms - last_telemetry_ms <= 5000
+                    was_connected = self._device_connection_state.get(device_id, True)
+                    if was_connected and not is_connected:
+                        self._device_connection_state[device_id] = False
+                        disconnected.append((device_id, record.display_name or device_id, last_telemetry_ms))
+
+            for device_id, display_name, last_telemetry_ms in disconnected:
+                self.telemetry_logger.log_event(
+                    "device_disconnected",
+                    f"{display_name} telemetry disconnected",
+                    {"last_telemetry_seen_ms": last_telemetry_ms},
+                    device_id=device_id,
+                    severity="warn",
+                )
 
     def configured_rover_name(self, *keys: str) -> str:
         names = self.config.get("dashboard", {}).get("roverNames", {})
@@ -1165,11 +1196,25 @@ class DashboardState:
             self._condition.notify_all()
 
             logged_display_name = record.display_name or device_id
+            was_disconnected = (
+                info_payload is None
+                and bool(payload)
+                and self._device_connection_state.get(device_id) is False
+            )
+            if info_payload is None and bool(payload):
+                self._device_connection_state[device_id] = True
 
         if topic in {"batch_ds", "info/mcu"} or topic.startswith(("batch_ds/", "ds/")):
             logging.debug("MQTT %s from %s: %s", topic, device_id, decoded)
 
         if info_payload is None:
+            if was_disconnected:
+                self.telemetry_logger.log_event(
+                    "device_reconnected",
+                    f"{logged_display_name} telemetry reconnected",
+                    {"topic": topic, "source_host": source_host},
+                    device_id=device_id,
+                )
             self.telemetry_logger.log_sample(
                 device_id=device_id,
                 display_name=logged_display_name,
