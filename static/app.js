@@ -1262,6 +1262,37 @@ function linePath(points, width, height, padding, minValue, maxValue) {
     .join(" ");
 }
 
+function compactTimeLabel(ms) {
+  const date = new Date(ms);
+  if (state.logRange === "live") {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" });
+}
+
+function chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits) {
+  const valueMid = (minValue + maxValue) / 2;
+  const yLabels = [
+    [maxValue, padding.top],
+    [valueMid, padding.top + (height - padding.top - padding.bottom) / 2],
+    [minValue, height - padding.bottom],
+  ]
+    .map(
+      ([value, y]) => `
+        <text class="chart-axis-label y-axis-label" x="${padding.left - 12}" y="${Number(y).toFixed(1)}">${escapeHtml(Number(value).toFixed(digits) + suffix)}</text>
+      `
+    )
+    .join("");
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  const xLabels = `
+    <text class="chart-axis-label x-axis-label" x="${padding.left}" y="${height - 8}">${escapeHtml(compactTimeLabel(first.time))}</text>
+    <text class="chart-axis-label x-axis-label end" x="${width - padding.right}" y="${height - 8}">${escapeHtml(compactTimeLabel(last.time))}</text>
+  `;
+  return `${yLabels}${xLabels}`;
+}
+
 function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490", digits = 1 } = {}) {
   const points = buildLinePoints(rows, valueGetter);
   if (!points.length) {
@@ -1269,8 +1300,8 @@ function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490"
     return;
   }
   const width = 520;
-  const height = 210;
-  const padding = { top: 18, right: 18, bottom: 28, left: 42 };
+  const height = 236;
+  const padding = { top: 18, right: 22, bottom: 42, left: 64 };
   const values = points.map((point) => point.value);
   let minValue = Math.min(...values);
   let maxValue = Math.max(...values);
@@ -1284,11 +1315,13 @@ function renderLineChart(el, rows, valueGetter, { suffix = "", color = "#0f7490"
   }
   const path = linePath(points, width, height, padding, minValue, maxValue);
   const fillPath = `${path} L ${points[points.length - 1].x.toFixed(2)} ${height - padding.bottom} L ${points[0].x.toFixed(2)} ${height - padding.bottom} Z`;
+  const axisLabels = chartAxisLabels(points, width, height, padding, minValue, maxValue, suffix, digits);
 
   el.innerHTML = `
     <svg class="line-chart-svg" viewBox="0 0 ${width} ${height}" role="img" style="--chart-color: ${color}">
       <line class="chart-grid-line" x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}"></line>
       <line class="chart-grid-line" x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}"></line>
+      ${axisLabels}
       <path class="chart-area" d="${fillPath}"></path>
       <path class="chart-line" d="${path}"></path>
       <line class="chart-hover-line" x1="0" y1="${padding.top}" x2="0" y2="${height - padding.bottom}" hidden></line>

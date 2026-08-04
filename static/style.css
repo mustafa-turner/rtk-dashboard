@@ -753,9 +753,9 @@ summary {
 }
 
 .log-range-tab.active {
-  background: var(--panel);
-  color: var(--ink);
-  box-shadow: 0 1px 4px rgba(25, 27, 31, 0.12);
+  background: var(--cyan);
+  color: #ffffff;
+  box-shadow: 0 0 0 1px rgba(15, 116, 144, 0.22), 0 2px 8px rgba(15, 116, 144, 0.22);
 }
 
 .log-metric-grid {
@@ -813,13 +813,13 @@ summary {
 
 .line-chart {
   position: relative;
-  min-height: 210px;
+  min-height: 236px;
 }
 
 .line-chart-svg {
   display: block;
   width: 100%;
-  height: 210px;
+  height: 236px;
   overflow: visible;
 }
 
@@ -839,6 +839,25 @@ summary {
   stroke-width: 3;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.chart-axis-label {
+  fill: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.y-axis-label {
+  dominant-baseline: middle;
+  text-anchor: end;
+}
+
+.x-axis-label {
+  text-anchor: start;
+}
+
+.x-axis-label.end {
+  text-anchor: end;
 }
 
 .chart-hover-line {
