@@ -169,17 +169,26 @@ rover publish interval of about 2 seconds, expect roughly `40-120 MB` per day
 per device for raw samples, depending on payload size. The default 30 day
 retention is comfortable on a 1 TB SSD, and hourly summaries are tiny.
 
-The Statistics tab reads these local logging API endpoints:
+The Statistics tab uses a shared server-sent event stream. Browsers with the
+same range and device subscription share one server-side calculation schedule,
+and each new subscriber receives the group's latest cached snapshot:
+
+- `/api/statistics/stream?range=live|24h|7d|30d&device_id=...`
+- `POST /api/statistics/refresh?range=...&device_id=...` for manual refresh
+
+The underlying local logging API endpoints remain available for diagnostics and
+other consumers:
 
 - `/api/logs/summary?range=24h|7d|30d&device_id=...`
 - `/api/logs/hourly?from=...&to=...&device_id=...`
 - `/api/logs/events?from=...&to=...&device_id=...`
 - `/api/logs/samples?from=...&to=...&device_id=...&limit=500`
 
-While the Statistics tab is open, it refreshes automatically. Use the top rover
-buttons to choose which crane to plot, then switch between `30 days`, `7 days`,
-`24 hours`, and `Live`. The live chart plots recent raw samples at the device
-publish cadence. Moving across a chart shows the nearest timestamp and value.
+While the Statistics tab is open, the server pushes shared snapshots at an
+interval appropriate for the selected range. Use the top rover buttons to choose
+which crane to plot, then switch between `30 days`, `7 days`, `24 hours`, and
+`Live`. The live chart plots recent raw samples at the device publish cadence.
+Moving across a chart shows the nearest timestamp and value.
 
 The raw sample table stores the full JSON payload, so future devices such as
 tide sensors or truck trackers can be logged before the dashboard gets

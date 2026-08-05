@@ -13,6 +13,10 @@ const state = {
   statistics: null,
   statisticsFetchInFlight: false,
   statisticsRange: "24h",
+  statisticsStream: null,
+  statisticsStreamKey: "",
+  statisticsStreamConnected: false,
+  statisticsStreamVersion: -1,
   snapshotServerNowMs: 0,
   snapshotLocalReceivedMs: 0,
   liveSnapshot: null,
@@ -946,7 +950,7 @@ function selectHeaderRover(deviceId) {
   state.selectedId = deviceId;
   render(snapshot);
   if (state.currentView === "statistics") {
-    refreshStatistics().catch((error) => console.error("Statistics refresh failed", error));
+    restartStatisticsStream();
   }
 
   const latLng = getLatLng(device.telemetry || {});
@@ -1144,33 +1148,23 @@ function setActiveView(view) {
   byId("replay-panel").hidden = view !== "replay";
   if (view === "statistics") {
     stopReplay();
-    refreshStatistics().catch((error) => console.error("Statistics refresh failed", error));
+    restartStatisticsStream();
   } else if (view === "replay") {
+    closeStatisticsStream();
     initReplay().catch((error) => console.error("Replay init failed", error));
     if (state.map) window.requestAnimationFrame(() => state.map.invalidateSize());
   } else if (state.map) {
+    closeStatisticsStream();
     stopReplay();
     fetchLatestState(true).catch((error) => console.error("State refresh failed", error));
     window.requestAnimationFrame(() => state.map.invalidateSize());
+  } else {
+    closeStatisticsStream();
   }
 }
 
-function statisticsRangeMs() {
-  return parseRangeToMs(state.statisticsRange === "live" ? "10m" : state.statisticsRange);
-}
-
-function parseRangeToMs(value) {
-  const text = String(value || "24h").trim().toLowerCase();
-  const amount = Number.parseFloat(text);
-  if (!Number.isFinite(amount) || amount <= 0) return 24 * 60 * 60 * 1000;
-  if (text.endsWith("d")) return amount * 24 * 60 * 60 * 1000;
-  if (text.endsWith("w")) return amount * 7 * 24 * 60 * 60 * 1000;
-  if (text.endsWith("m")) return amount * 60 * 1000;
-  return amount * 60 * 60 * 1000;
-}
-
 function selectedStatisticsDeviceId() {
-  return selectedDevice()?.device_id || "";
+  return String(selectedDevice()?.device_id || "").trim().slice(0, 200);
 }
 
 function updateStatisticsRangeTabs() {
@@ -1315,33 +1309,92 @@ function initReplayPanelInteractions() {
   );
 }
 
+function statisticsSubscription() {
+  return {
+    range: state.statisticsRange,
+    deviceId: selectedStatisticsDeviceId(),
+  };
+}
+
+function closeStatisticsStream() {
+  if (state.statisticsStream) {
+    state.statisticsStream.close();
+  }
+  state.statisticsStream = null;
+  state.statisticsStreamKey = "";
+  state.statisticsStreamConnected = false;
+  state.statisticsStreamVersion = -1;
+}
+
+function openStatisticsStream() {
+  if (state.currentView !== "statistics") return;
+  const subscription = statisticsSubscription();
+  const streamKey = JSON.stringify([subscription.range, subscription.deviceId]);
+  if (state.statisticsStream && state.statisticsStreamKey === streamKey) return;
+
+  closeStatisticsStream();
+  const params = new URLSearchParams({ range: subscription.range });
+  if (subscription.deviceId) params.set("device_id", subscription.deviceId);
+  const stream = new EventSource(`/api/statistics/stream?${params.toString()}`);
+  state.statisticsStream = stream;
+  state.statisticsStreamKey = streamKey;
+
+  stream.onopen = () => {
+    if (state.statisticsStream === stream) state.statisticsStreamConnected = true;
+  };
+  stream.addEventListener("snapshot", (event) => {
+    if (state.statisticsStream !== stream || state.currentView !== "statistics") return;
+    try {
+      const payload = JSON.parse(event.data);
+      const payloadSubscription = payload?.subscription || {};
+      if (
+        payloadSubscription.range !== subscription.range ||
+        String(payloadSubscription.device_id || "") !== subscription.deviceId
+      ) {
+        return;
+      }
+      const version = Number(payload.version);
+      if (!Number.isFinite(version) || version <= state.statisticsStreamVersion) return;
+      state.statisticsStreamConnected = true;
+      state.statisticsStreamVersion = version;
+      state.statistics = payload.statistics;
+      renderStatistics();
+    } catch (error) {
+      console.error("Invalid statistics snapshot", error);
+    }
+  });
+  stream.onerror = () => {
+    if (state.statisticsStream === stream) state.statisticsStreamConnected = false;
+  };
+}
+
+function restartStatisticsStream() {
+  closeStatisticsStream();
+  openStatisticsStream();
+}
+
 async function refreshStatistics() {
   if (state.statisticsFetchInFlight) return;
   state.statisticsFetchInFlight = true;
-  const range = state.statisticsRange === "live" ? "10m" : state.statisticsRange;
-  const rangeMs = statisticsRangeMs();
-  const to = Date.now();
-  const from = to - rangeMs;
-  const deviceId = selectedStatisticsDeviceId();
-  const params = new URLSearchParams({ range, from: String(from), to: String(to) });
-  if (deviceId) params.set("device_id", deviceId);
-  const eventParams = new URLSearchParams({ range, from: String(from), to: String(to), limit: "80" });
-  const sampleParams = new URLSearchParams({ from: String(from), to: String(to), limit: "500" });
-  if (deviceId) sampleParams.set("device_id", deviceId);
+  const button = byId("refresh-statistics");
+  button.disabled = true;
+  const subscription = statisticsSubscription();
+  const params = new URLSearchParams({ range: subscription.range });
+  if (subscription.deviceId) params.set("device_id", subscription.deviceId);
   try {
-    const requests = [
-      fetchJson(`/api/logs/summary?${params.toString()}`),
-      fetchJson(`/api/logs/hourly?${params.toString()}`),
-      fetchJson(`/api/logs/events?${eventParams.toString()}`),
-    ];
-    if (state.statisticsRange === "live") {
-      requests.push(fetchJson(`/api/logs/samples?${sampleParams.toString()}`));
+    if (!state.statisticsStream) openStatisticsStream();
+    const response = await fetch(`/api/statistics/refresh?${params.toString()}`, {
+      method: "POST",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`/api/statistics/refresh returned ${response.status}`);
     }
-    const [summary, hourly, events, samples] = await Promise.all(requests);
-    state.statistics = { summary, hourly, events, samples: samples || state.statistics?.samples || null };
-    renderStatistics();
+    const result = await response.json();
+    if (result.status === "no_active_subscription") restartStatisticsStream();
   } finally {
     state.statisticsFetchInFlight = false;
+    button.disabled = false;
   }
 }
 
@@ -1738,6 +1791,7 @@ function renderStatistics() {
 }
 
 function render(snapshot) {
+  const previousSelectedId = state.selectedId;
   state.lastVersion = Math.max(state.lastVersion, snapshotVersion(snapshot));
   state.data = snapshot;
   if (!snapshot.server?.replay) {
@@ -1746,6 +1800,9 @@ function render(snapshot) {
   state.snapshotServerNowMs = Number(snapshot?.server?.now_ms) || Date.now();
   state.snapshotLocalReceivedMs = Date.now();
   ensureSelectedDevice(snapshot);
+  if (state.currentView === "statistics" && state.selectedId !== previousSelectedId) {
+    restartStatisticsStream();
+  }
   const selected = selectedDevice();
   const safetyRovers = buildSafetyRovers(selected, snapshot);
   const payloadRovers = buildPayloadRovers(selected, snapshot);
@@ -1836,7 +1893,7 @@ async function boot() {
     button.addEventListener("click", () => {
       state.statisticsRange = button.dataset.range || "24h";
       updateStatisticsRangeTabs();
-      refreshStatistics().catch((error) => console.error(error));
+      restartStatisticsStream();
     });
   });
 
@@ -1869,11 +1926,6 @@ async function boot() {
       console.error("State refresh failed", error);
     });
   }, state.fallbackPollMs);
-  setInterval(() => {
-    if (state.currentView === "statistics") {
-      refreshStatistics().catch((error) => console.error("Statistics refresh failed", error));
-    }
-  }, 2000);
 }
 
 boot().catch((error) => {

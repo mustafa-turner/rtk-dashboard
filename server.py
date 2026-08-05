@@ -336,6 +336,15 @@ def first_query_value(query: dict[str, list[str]], key: str) -> str:
     return values[0] if values else ""
 
 
+def normalize_statistics_range(value: str | None) -> str:
+    normalized = str(value or "24h").strip().lower()
+    return normalized if normalized in {"live", "24h", "7d", "30d"} else "24h"
+
+
+def normalize_statistics_device_id(value: str | None) -> str:
+    return str(value or "").strip()[:200]
+
+
 def is_ip_address(value: str) -> bool:
     try:
         ipaddress.ip_address(value)
@@ -1199,6 +1208,22 @@ class TelemetryLogger:
             ).fetchall()
         return {"enabled": True, "from_ms": from_ms, "to_ms": to_ms, "samples": [dict(row) for row in rows]}
 
+    def statistics_snapshot(self, range_name: str, device_id: str = "") -> dict[str, Any]:
+        """Build the statistics UI payload using the same queries as the HTTP APIs."""
+        range_name = normalize_statistics_range(range_name)
+        # Preserve the former browser behavior: live charts/events cover ten
+        # minutes, while the summary endpoint historically defaulted to 24h.
+        range_ms = 10 * 60 * 1000 if range_name == "live" else parse_range_ms(range_name)
+        summary_range_ms = 24 * 60 * 60 * 1000 if range_name == "live" else range_ms
+        end_ms = now_ms()
+        start_ms = end_ms - range_ms
+        return {
+            "summary": self.summary(summary_range_ms, device_id),
+            "hourly": self.hourly(start_ms, end_ms, device_id),
+            "events": self.events(start_ms, end_ms, device_id, 80),
+            "samples": self.samples(start_ms, end_ms, device_id, 500) if range_name == "live" else None,
+        }
+
     def replay_range(self) -> dict[str, Any]:
         if not self.enabled or self.con is None:
             return {"enabled": False}
@@ -1300,6 +1325,164 @@ class TelemetryLogger:
         }
 
 
+@dataclass
+class StatisticsSubscription:
+    range_name: str
+    device_id: str
+    refresh_interval_sec: float
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    clients: set[int] = field(default_factory=set)
+    cached_payload: dict[str, Any] | None = None
+    version: int = 0
+    generated_at_ms: int = 0
+    refresh_in_flight: bool = False
+    refresh_requested: bool = False
+    producer_stopping: bool = False
+    producer: threading.Thread | None = None
+    last_manual_refresh_ms: int = 0
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.range_name, self.device_id
+
+
+class StatisticsSubscriptionRegistry:
+    """Process-local shared statistics producers.
+
+    If the application is deployed with multiple backend instances, replace this
+    registry with Redis Pub/Sub or Streams, PostgreSQL LISTEN/NOTIFY, or NATS.
+    """
+
+    HEARTBEAT_SEC = 20.0
+    MANUAL_REFRESH_COOLDOWN_MS = 1000
+
+    def __init__(self, logger: TelemetryLogger):
+        self.logger = logger
+        self._lock = threading.RLock()
+        self._groups: dict[tuple[str, str], StatisticsSubscription] = {}
+        self._next_client_id = 0
+
+    @staticmethod
+    def refresh_interval(range_name: str) -> float:
+        if range_name == "live":
+            return 5.0
+        if range_name == "24h":
+            return 60.0
+        return 5 * 60.0
+
+    def subscribe(self, range_name: str, device_id: str) -> tuple[StatisticsSubscription, int]:
+        range_name = normalize_statistics_range(range_name)
+        device_id = normalize_statistics_device_id(device_id)
+        key = (range_name, device_id)
+        with self._lock:
+            group = self._groups.get(key)
+            if group is None:
+                group = StatisticsSubscription(range_name, device_id, self.refresh_interval(range_name))
+                self._groups[key] = group
+            self._next_client_id += 1
+            client_id = self._next_client_id
+            with group.condition:
+                group.clients.add(client_id)
+                if group.producer is None or not group.producer.is_alive() or group.producer_stopping:
+                    group.producer_stopping = False
+                    group.producer = threading.Thread(
+                        target=self._run_group,
+                        args=(group,),
+                        name=f"statistics-{range_name}-{device_id or 'all'}",
+                        daemon=True,
+                    )
+                    group.producer.start()
+        return group, client_id
+
+    def unsubscribe(self, group: StatisticsSubscription, client_id: int) -> None:
+        with group.condition:
+            group.clients.discard(client_id)
+            group.condition.notify_all()
+
+    def wait_for_snapshot(
+        self, group: StatisticsSubscription, version: int, timeout: float | None = None
+    ) -> dict[str, Any] | None:
+        timeout = self.HEARTBEAT_SEC if timeout is None else timeout
+        with group.condition:
+            if group.cached_payload is None or group.version <= version:
+                group.condition.wait(timeout)
+            if group.cached_payload is not None and group.version > version:
+                return group.cached_payload
+            return None
+
+    def request_refresh(self, range_name: str, device_id: str) -> dict[str, Any]:
+        key = (normalize_statistics_range(range_name), normalize_statistics_device_id(device_id))
+        with self._lock:
+            group = self._groups.get(key)
+        if group is None:
+            return {"accepted": False, "status": "no_active_subscription"}
+
+        current_ms = now_ms()
+        with group.condition:
+            if not group.clients:
+                return {"accepted": False, "status": "no_active_subscription"}
+            if current_ms - group.last_manual_refresh_ms < self.MANUAL_REFRESH_COOLDOWN_MS:
+                return {"accepted": False, "status": "cooldown", "version": group.version}
+            group.last_manual_refresh_ms = current_ms
+            group.refresh_requested = True
+            group.condition.notify_all()
+            return {"accepted": True, "status": "refresh_requested", "version": group.version}
+
+    def _run_group(self, group: StatisticsSubscription) -> None:
+        try:
+            while True:
+                with group.condition:
+                    if not group.clients:
+                        group.producer_stopping = True
+                        return
+                    group.refresh_requested = False
+                    group.refresh_in_flight = True
+
+                try:
+                    statistics = self.logger.statistics_snapshot(group.range_name, group.device_id)
+                    generated_at_ms = now_ms()
+                    with group.condition:
+                        group.version += 1
+                        group.generated_at_ms = generated_at_ms
+                        group.cached_payload = {
+                            "subscription": {
+                                "range": group.range_name,
+                                "device_id": group.device_id,
+                            },
+                            "version": group.version,
+                            "generated_at_ms": generated_at_ms,
+                            "statistics": statistics,
+                        }
+                        group.condition.notify_all()
+                except Exception as exc:
+                    logging.warning(
+                        "Statistics refresh failed range=%s device_id=%s: %s",
+                        group.range_name,
+                        group.device_id or "all",
+                        exc,
+                    )
+                finally:
+                    with group.condition:
+                        group.refresh_in_flight = False
+                        group.condition.notify_all()
+
+                deadline = time.monotonic() + group.refresh_interval_sec
+                with group.condition:
+                    while group.clients and not group.refresh_requested:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        group.condition.wait(remaining)
+                    if not group.clients:
+                        group.producer_stopping = True
+                        return
+        finally:
+            with self._lock:
+                with group.condition:
+                    if not group.clients and self._groups.get(group.key) is group:
+                        self._groups.pop(group.key, None)
+
+
 class DashboardState:
     def __init__(self, config: dict[str, Any]):
         self.config = config
@@ -1313,6 +1496,7 @@ class DashboardState:
         self.started_ms = now_ms()
         self.mbtiles = discover_mbtiles()
         self.telemetry_logger = TelemetryLogger(config)
+        self.statistics_registry = StatisticsSubscriptionRegistry(self.telemetry_logger)
         self.telemetry_logger.start()
         self.start_connection_monitor()
 
@@ -1800,6 +1984,9 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/replay/"):
             self.handle_replay_api(parsed.path, parse_qs(parsed.query))
             return
+        if parsed.path == "/api/statistics/stream":
+            self.handle_statistics_stream(parse_qs(parsed.query))
+            return
         if parsed.path == "/events":
             self.handle_events()
             return
@@ -1807,6 +1994,17 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
             self.serve_mbtiles_tile(parsed.path)
             return
         self.serve_static(parsed.path)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/statistics/refresh":
+            query = parse_qs(parsed.query)
+            result = self.dashboard_state.statistics_registry.request_refresh(
+                first_query_value(query, "range"), first_query_value(query, "device_id")
+            )
+            self.send_json(result, HTTPStatus.ACCEPTED if result["accepted"] else HTTPStatus.OK)
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def handle_logs_api(self, path: str, query: dict[str, list[str]]) -> None:
         logger = self.dashboard_state.telemetry_logger
@@ -1858,20 +2056,50 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
-    def send_json(self, payload: Any) -> None:
+    def send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(encoded)
 
+    def handle_statistics_stream(self, query: dict[str, list[str]]) -> None:
+        registry = self.dashboard_state.statistics_registry
+        group, client_id = registry.subscribe(
+            first_query_value(query, "range"), first_query_value(query, "device_id")
+        )
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.connection.settimeout(30)
+
+        version = -1
+        try:
+            while True:
+                payload = registry.wait_for_snapshot(group, version)
+                if payload is None:
+                    self.wfile.write(b": heartbeat\n\n")
+                else:
+                    version = int(payload["version"])
+                    encoded = json.dumps(payload, separators=(",", ":"))
+                    self.wfile.write(f"event: snapshot\ndata: {encoded}\n\n".encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            return
+        finally:
+            registry.unsubscribe(group, client_id)
+
     def handle_events(self) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
         version = -1
