@@ -21,7 +21,8 @@
         <div class="header-rover-list" id="header-rover-list"></div>
         <nav class="view-tabs" aria-label="Dashboard views">
           <button type="button" class="view-tab active" data-view="live">Live</button>
-          <button type="button" class="view-tab" data-view="logging">Logging</button>
+          <button type="button" class="view-tab" data-view="replay">Replay</button>
+          <button type="button" class="view-tab" data-view="statistics">Statistics</button>
         </nav>
         <div class="status-strip">
           <div class="status-dot" id="live-dot"></div>
@@ -35,6 +36,29 @@
           <div class="map-overlay">
             <div class="selected-label" id="selected-label">No rover selected</div>
             <button type="button" id="center-map" title="Center on rover">C</button>
+          </div>
+          <div class="replay-panel" id="replay-panel" hidden>
+            <div class="replay-time-row">
+              <button type="button" id="replay-play" title="Play replay">Play</button>
+              <strong id="replay-current-label">-</strong>
+              <select id="replay-speed" aria-label="Replay speed">
+                <option value="1">1x</option>
+                <option value="2">2x</option>
+                <option value="5">5x</option>
+                <option value="10">10x</option>
+                <option value="30">30x</option>
+                <option value="60">60x</option>
+              </select>
+            </div>
+            <input type="range" id="replay-scrubber" min="0" max="0" step="1" value="0" aria-label="Replay timeline">
+            <div class="replay-jump-row">
+              <span id="replay-start-label">-</span>
+              <label>
+                <span>Go to</span>
+                <input type="datetime-local" id="replay-timestamp" step="1">
+              </label>
+              <span id="replay-end-label">-</span>
+            </div>
           </div>
         </section>
 
@@ -90,43 +114,43 @@
         </aside>
       </main>
 
-      <main class="logging-view app-view" id="logging-view" hidden>
-        <section class="logging-toolbar">
+      <main class="statistics-view app-view" id="statistics-view" hidden>
+        <section class="statistics-toolbar">
           <div>
-            <div class="panel-title">Logging</div>
-            <h2 id="logging-heading">Operational History</h2>
+            <div class="panel-title">Statistics</div>
+            <h2 id="statistics-heading">Operational History</h2>
           </div>
-          <div class="logging-controls">
-            <div class="log-range-tabs" aria-label="Log range">
-              <button type="button" class="log-range-tab" data-range="30d">30 days</button>
-              <button type="button" class="log-range-tab" data-range="7d">7 days</button>
-              <button type="button" class="log-range-tab active" data-range="24h">24 hours</button>
-              <button type="button" class="log-range-tab" data-range="live">Live</button>
+          <div class="statistics-controls">
+            <div class="statistics-range-tabs" aria-label="Statistics range">
+              <button type="button" class="statistics-range-tab" data-range="30d">30 days</button>
+              <button type="button" class="statistics-range-tab" data-range="7d">7 days</button>
+              <button type="button" class="statistics-range-tab active" data-range="24h">24 hours</button>
+              <button type="button" class="statistics-range-tab" data-range="live">Live</button>
             </div>
-            <button type="button" id="refresh-logs">Refresh</button>
+            <button type="button" id="refresh-statistics">Refresh</button>
           </div>
         </section>
 
-        <section class="log-metric-grid" id="log-metric-grid"></section>
+        <section class="statistics-metric-grid" id="statistics-metric-grid"></section>
 
-        <section class="log-chart-grid">
-          <div class="log-panel">
+        <section class="statistics-chart-grid">
+          <div class="statistics-panel">
             <div class="panel-title" id="distance-chart-title">Closest Distance By Hour</div>
             <div class="line-chart distance-chart" id="distance-chart"></div>
           </div>
-          <div class="log-panel">
+          <div class="statistics-panel">
             <div class="panel-title" id="rtk-chart-title">RTK Fixed Rate</div>
             <div class="line-chart rtk-chart" id="rtk-chart"></div>
           </div>
-          <div class="log-panel">
+          <div class="statistics-panel">
             <div class="panel-title" id="ntrip-chart-title">NTRIP Connected Rate</div>
             <div class="line-chart ntrip-chart" id="ntrip-chart"></div>
           </div>
         </section>
 
-        <section class="log-panel">
+        <section class="statistics-panel">
           <div class="panel-title">Events</div>
-          <div class="log-events" id="log-events"></div>
+          <div class="statistics-events" id="statistics-events"></div>
         </section>
       </main>
     </div>

@@ -1199,6 +1199,106 @@ class TelemetryLogger:
             ).fetchall()
         return {"enabled": True, "from_ms": from_ms, "to_ms": to_ms, "samples": [dict(row) for row in rows]}
 
+    def replay_range(self) -> dict[str, Any]:
+        if not self.enabled or self.con is None:
+            return {"enabled": False}
+        with self._lock:
+            row = self.con.execute(
+                """
+                select
+                    count(*) as sample_count,
+                    min(at_ms) as from_ms,
+                    max(at_ms) as to_ms
+                from telemetry_samples
+                where latitude is not null and longitude is not null
+                """
+            ).fetchone()
+            devices = self.con.execute(
+                """
+                select device_id, display_name, device_type, first_seen_ms, last_seen_ms
+                from devices
+                order by display_name collate nocase
+                """
+            ).fetchall()
+        return {
+            "enabled": True,
+            "databasePath": str(self.path),
+            "sample_count": int(row["sample_count"] or 0),
+            "from_ms": row["from_ms"],
+            "to_ms": row["to_ms"],
+            "devices": [dict(item) for item in devices],
+        }
+
+    def replay_snapshot(self, at_ms: int, lookback_ms: int = 5 * 60 * 1000) -> dict[str, Any]:
+        if not self.enabled or self.con is None:
+            return {"enabled": False, "at_ms": at_ms, "devices": {}}
+
+        lookback_ms = max(1000, min(int(lookback_ms), 24 * 60 * 60 * 1000))
+        from_ms = at_ms - lookback_ms
+        with self._lock:
+            rows = self.con.execute(
+                """
+                select s.* from telemetry_samples s
+                join (
+                    select device_id, max(at_ms) as at_ms
+                    from telemetry_samples
+                    where at_ms <= ? and at_ms >= ?
+                      and latitude is not null and longitude is not null
+                    group by device_id
+                ) latest on latest.device_id = s.device_id and latest.at_ms = s.at_ms
+                order by s.display_name collate nocase, s.device_id collate nocase
+                """,
+                (at_ms, from_ms),
+            ).fetchall()
+
+        devices = {}
+        for row in rows:
+            payload = {}
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+
+            payload["latitude"] = row["latitude"]
+            payload["longitude"] = row["longitude"]
+            payload["position"] = [row["longitude"], row["latitude"]]
+            payload["fix_mode"] = row["fix_mode"]
+            payload["ntrip_status"] = row["ntrip_status"]
+            payload["nearest_peer_id"] = row["peer_id"] or payload.get("nearest_peer_id")
+            payload["nearest_peer_safe_distance_m"] = row["safe_distance_m"]
+            payload["nearest_peer_distance_m"] = row["raw_distance_m"]
+            payload["nearest_peer_uncertainty_m"] = row["uncertainty_m"]
+            payload["local_accuracy_m"] = row["accuracy_m"]
+            payload["nearest_peer_accuracy_m"] = row["peer_accuracy_m"]
+            payload["battery_percent"] = row["battery_percent"]
+            payload["battery_voltage_v"] = row["battery_voltage_v"]
+            payload["uptime_sec"] = row["uptime_sec"]
+            payload["fix_mode_label"] = FIX_MODE_LABELS.get(row["fix_mode"], "UNKNOWN")
+            payload["ntrip_status_label"] = NTRIP_STATUS_LABELS.get(row["ntrip_status"], "UNKNOWN")
+
+            device_id = str(row["device_id"])
+            devices[device_id] = {
+                "device_id": device_id,
+                "display_name": row["display_name"] or device_id,
+                "telemetry": payload,
+                "last_seen_ms": row["at_ms"],
+                "last_telemetry_seen_ms": row["at_ms"],
+                "last_position_seen_ms": row["at_ms"],
+                "mqtt_client_id": row["mqtt_client_id"] or "",
+                "source_host": row["source_host"] or "",
+                "username": row["username"] or "",
+                "info": {},
+            }
+
+        return {
+            "enabled": True,
+            "at_ms": at_ms,
+            "lookback_ms": lookback_ms,
+            "devices": devices,
+        }
+
 
 class DashboardState:
     def __init__(self, config: dict[str, Any]):
@@ -1697,6 +1797,9 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/logs/"):
             self.handle_logs_api(parsed.path, parse_qs(parsed.query))
             return
+        if parsed.path.startswith("/api/replay/"):
+            self.handle_replay_api(parsed.path, parse_qs(parsed.query))
+            return
         if parsed.path == "/events":
             self.handle_events()
             return
@@ -1724,6 +1827,34 @@ class DashboardHttpHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/logs/samples":
             self.send_json(logger.samples(start_ms, end_ms, device_id, limit))
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def handle_replay_api(self, path: str, query: dict[str, list[str]]) -> None:
+        logger = self.dashboard_state.telemetry_logger
+        if path == "/api/replay/range":
+            self.send_json(logger.replay_range())
+            return
+        if path == "/api/replay/state":
+            at_ms = parse_query_ms(first_query_value(query, "at"), now_ms())
+            lookback_ms = parse_query_ms(first_query_value(query, "lookback"), 5 * 60 * 1000)
+            replay = logger.replay_snapshot(at_ms, lookback_ms)
+            live = self.dashboard_state.snapshot()
+            self.send_json(
+                {
+                    "version": -at_ms,
+                    "server": {
+                        **live["server"],
+                        "now_ms": at_ms,
+                        "replay": True,
+                        "requested_at_ms": at_ms,
+                        "lookback_ms": replay.get("lookback_ms", lookback_ms),
+                    },
+                    "devices": replay.get("devices", {}),
+                    "peers": {},
+                    "events": [],
+                }
+            )
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 

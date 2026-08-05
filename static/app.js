@@ -10,11 +10,22 @@ const state = {
   stateFetchInFlight: false,
   fallbackPollMs: 5000,
   currentView: "live",
-  logs: null,
-  logsFetchInFlight: false,
-  logRange: "24h",
+  statistics: null,
+  statisticsFetchInFlight: false,
+  statisticsRange: "24h",
   snapshotServerNowMs: 0,
   snapshotLocalReceivedMs: 0,
+  liveSnapshot: null,
+  replay: {
+    range: null,
+    atMs: 0,
+    playing: false,
+    speed: 1,
+    timer: null,
+    lastTickMs: 0,
+    fetchInFlight: false,
+    pendingAtMs: null,
+  },
 };
 
 const ROVER_DISCONNECTED_MS = 5000;
@@ -99,6 +110,25 @@ function timeLabel(ms) {
   });
 }
 
+function inputDateTimeValue(ms) {
+  const number = Number(ms);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "";
+  }
+  const date = new Date(number);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 19);
+}
+
+function msFromInputDateTime(value) {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
 function percent(numerator, denominator, digits = 0) {
   const top = Number(numerator);
   const bottom = Number(denominator);
@@ -110,6 +140,9 @@ function percent(numerator, denominator, digits = 0) {
 
 function snapshotNowMs(snapshot) {
   const serverNowMs = Number(snapshot?.server?.now_ms) || state.snapshotServerNowMs;
+  if (snapshot?.server?.replay) {
+    return serverNowMs || Date.now();
+  }
   const localReceivedMs = Number(state.snapshotLocalReceivedMs);
   if (!Number.isFinite(serverNowMs) || serverNowMs <= 0) {
     return Date.now();
@@ -626,6 +659,11 @@ function updateHeader(snapshot) {
   const liveDot = byId("live-dot");
   const liveLabel = byId("live-label");
   liveDot.className = "status-dot";
+  if (snapshot.server?.replay) {
+    liveDot.classList.add("offline");
+    liveLabel.textContent = "Replay";
+    return;
+  }
   if (!selected) {
     liveLabel.textContent = "Waiting";
     return;
@@ -907,8 +945,8 @@ function selectHeaderRover(deviceId) {
 
   state.selectedId = deviceId;
   render(snapshot);
-  if (state.currentView === "logging") {
-    refreshLogs().catch((error) => console.error("Log refresh failed", error));
+  if (state.currentView === "statistics") {
+    refreshStatistics().catch((error) => console.error("Statistics refresh failed", error));
   }
 
   const latLng = getLatLng(device.telemetry || {});
@@ -1101,17 +1139,24 @@ function setActiveView(view) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
-  byId("live-view").hidden = view !== "live";
-  byId("logging-view").hidden = view !== "logging";
-  if (view === "logging") {
-    refreshLogs().catch((error) => console.error("Log refresh failed", error));
+  byId("live-view").hidden = view === "statistics";
+  byId("statistics-view").hidden = view !== "statistics";
+  byId("replay-panel").hidden = view !== "replay";
+  if (view === "statistics") {
+    stopReplay();
+    refreshStatistics().catch((error) => console.error("Statistics refresh failed", error));
+  } else if (view === "replay") {
+    initReplay().catch((error) => console.error("Replay init failed", error));
+    if (state.map) window.requestAnimationFrame(() => state.map.invalidateSize());
   } else if (state.map) {
+    stopReplay();
+    fetchLatestState(true).catch((error) => console.error("State refresh failed", error));
     window.requestAnimationFrame(() => state.map.invalidateSize());
   }
 }
 
-function logRangeMs() {
-  return parseRangeToMs(state.logRange === "live" ? "10m" : state.logRange);
+function statisticsRangeMs() {
+  return parseRangeToMs(state.statisticsRange === "live" ? "10m" : state.statisticsRange);
 }
 
 function parseRangeToMs(value) {
@@ -1124,13 +1169,13 @@ function parseRangeToMs(value) {
   return amount * 60 * 60 * 1000;
 }
 
-function selectedLogDeviceId() {
+function selectedStatisticsDeviceId() {
   return selectedDevice()?.device_id || "";
 }
 
-function updateLogRangeTabs() {
-  document.querySelectorAll(".log-range-tab").forEach((button) => {
-    const active = button.dataset.range === state.logRange;
+function updateStatisticsRangeTabs() {
+  document.querySelectorAll(".statistics-range-tab").forEach((button) => {
+    const active = button.dataset.range === state.statisticsRange;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
@@ -1144,14 +1189,140 @@ async function fetchJson(url) {
   return response.json();
 }
 
-async function refreshLogs() {
-  if (state.logsFetchInFlight) return;
-  state.logsFetchInFlight = true;
-  const range = state.logRange === "live" ? "10m" : state.logRange;
-  const rangeMs = logRangeMs();
+function updateReplayControls() {
+  const range = state.replay.range;
+  const hasRange = Boolean(range?.enabled && range.from_ms && range.to_ms);
+  const atMs = state.replay.atMs || Number(range?.to_ms) || 0;
+  const scrubber = byId("replay-scrubber");
+  const timestamp = byId("replay-timestamp");
+  byId("replay-play").textContent = state.replay.playing ? "Pause" : "Play";
+  byId("replay-speed").value = String(state.replay.speed);
+  scrubber.disabled = !hasRange;
+  timestamp.disabled = !hasRange;
+  byId("replay-play").disabled = !hasRange;
+  byId("replay-speed").disabled = !hasRange;
+
+  if (!hasRange) {
+    byId("replay-current-label").textContent = "No replay samples";
+    byId("replay-start-label").textContent = "-";
+    byId("replay-end-label").textContent = "-";
+    return;
+  }
+
+  const fromMs = Number(range.from_ms);
+  const toMs = Number(range.to_ms);
+  scrubber.min = "0";
+  scrubber.max = String(Math.max(0, Math.round((toMs - fromMs) / 1000)));
+  scrubber.step = "1";
+  scrubber.value = String(Math.max(0, Math.round((clamp(atMs, fromMs, toMs) - fromMs) / 1000)));
+  timestamp.min = inputDateTimeValue(range.from_ms);
+  timestamp.max = inputDateTimeValue(range.to_ms);
+  timestamp.value = inputDateTimeValue(atMs);
+  byId("replay-current-label").textContent = timeLabel(atMs);
+  byId("replay-start-label").textContent = dateTimeLabel(range.from_ms);
+  byId("replay-end-label").textContent = dateTimeLabel(range.to_ms);
+}
+
+async function initReplay() {
+  if (!state.replay.range) {
+    state.replay.range = await fetchJson("/api/replay/range");
+    state.replay.atMs = Number(state.replay.range?.to_ms) || 0;
+  }
+  updateReplayControls();
+  if (state.replay.atMs) {
+    await loadReplayAt(state.replay.atMs);
+  }
+}
+
+async function loadReplayAt(atMs) {
+  const range = state.replay.range;
+  if (!range?.enabled || !range.from_ms || !range.to_ms) return;
+  const nextAtMs = clamp(Number(atMs) || Number(range.to_ms), Number(range.from_ms), Number(range.to_ms));
+  const requestedAtMs = nextAtMs;
+  state.replay.atMs = nextAtMs;
+  updateReplayControls();
+
+  if (state.replay.fetchInFlight) {
+    state.replay.pendingAtMs = nextAtMs;
+    return;
+  }
+
+  state.replay.fetchInFlight = true;
+  try {
+    const params = new URLSearchParams({ at: String(nextAtMs), lookback: String(5 * 60 * 1000) });
+    const snapshot = await fetchJson(`/api/replay/state?${params.toString()}`);
+    if (state.currentView === "replay") {
+      render(snapshot);
+    }
+  } finally {
+    state.replay.fetchInFlight = false;
+    const pending = state.replay.pendingAtMs;
+    state.replay.pendingAtMs = null;
+    if (pending !== null && pending !== requestedAtMs) {
+      loadReplayAt(pending).catch((error) => console.error("Replay refresh failed", error));
+    }
+  }
+}
+
+function stopReplay() {
+  state.replay.playing = false;
+  if (state.replay.timer) {
+    clearInterval(state.replay.timer);
+    state.replay.timer = null;
+  }
+  state.replay.lastTickMs = 0;
+  updateReplayControls();
+}
+
+function startReplay() {
+  const range = state.replay.range;
+  if (!range?.enabled) return;
+  state.replay.playing = true;
+  state.replay.lastTickMs = Date.now();
+  state.replay.timer = setInterval(() => {
+    const now = Date.now();
+    const elapsed = now - state.replay.lastTickMs;
+    state.replay.lastTickMs = now;
+    const nextAtMs = state.replay.atMs + elapsed * state.replay.speed;
+    if (nextAtMs >= Number(range.to_ms)) {
+      loadReplayAt(range.to_ms).catch((error) => console.error("Replay refresh failed", error));
+      stopReplay();
+      return;
+    }
+    loadReplayAt(nextAtMs).catch((error) => console.error("Replay refresh failed", error));
+  }, 500);
+  updateReplayControls();
+}
+
+function toggleReplayPlayback() {
+  if (state.replay.playing) {
+    stopReplay();
+  } else {
+    startReplay();
+  }
+}
+
+function initReplayPanelInteractions() {
+  const panel = byId("replay-panel");
+  if (typeof L !== "undefined" && L.DomEvent) {
+    L.DomEvent.disableClickPropagation(panel);
+    L.DomEvent.disableScrollPropagation(panel);
+  }
+  ["pointerdown", "pointermove", "pointerup", "mousedown", "mousemove", "mouseup", "touchstart", "touchmove", "touchend"].forEach(
+    (eventName) => {
+      panel.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+  );
+}
+
+async function refreshStatistics() {
+  if (state.statisticsFetchInFlight) return;
+  state.statisticsFetchInFlight = true;
+  const range = state.statisticsRange === "live" ? "10m" : state.statisticsRange;
+  const rangeMs = statisticsRangeMs();
   const to = Date.now();
   const from = to - rangeMs;
-  const deviceId = selectedLogDeviceId();
+  const deviceId = selectedStatisticsDeviceId();
   const params = new URLSearchParams({ range, from: String(from), to: String(to) });
   if (deviceId) params.set("device_id", deviceId);
   const eventParams = new URLSearchParams({ range, from: String(from), to: String(to), limit: "80" });
@@ -1163,20 +1334,20 @@ async function refreshLogs() {
       fetchJson(`/api/logs/hourly?${params.toString()}`),
       fetchJson(`/api/logs/events?${eventParams.toString()}`),
     ];
-    if (state.logRange === "live") {
+    if (state.statisticsRange === "live") {
       requests.push(fetchJson(`/api/logs/samples?${sampleParams.toString()}`));
     }
     const [summary, hourly, events, samples] = await Promise.all(requests);
-    state.logs = { summary, hourly, events, samples: samples || state.logs?.samples || null };
-    renderLogs();
+    state.statistics = { summary, hourly, events, samples: samples || state.statistics?.samples || null };
+    renderStatistics();
   } finally {
-    state.logsFetchInFlight = false;
+    state.statisticsFetchInFlight = false;
   }
 }
 
 function metricCard(label, value, note = "") {
   return `
-    <div class="log-metric">
+    <div class="statistics-metric">
       <span>${escapeHtml(label)}</span>
       <strong>${escapeHtml(value)}</strong>
       <small>${escapeHtml(note)}</small>
@@ -1184,7 +1355,7 @@ function metricCard(label, value, note = "") {
   `;
 }
 
-function renderLogMetrics(summary) {
+function renderStatisticsMetrics(summary) {
   const sampleCount = Number(summary?.sample_count) || 0;
   const fixTotal =
     (Number(summary?.fix_fixed_count) || 0) +
@@ -1193,7 +1364,7 @@ function renderLogMetrics(summary) {
   const closest = summary?.closest;
   const closestValue = closest?.closest_safe_distance_m ?? closest?.closest_raw_distance_m;
 
-  byId("log-metric-grid").innerHTML = [
+  byId("statistics-metric-grid").innerHTML = [
     metricCard("Samples", sampleCount.toLocaleString(), `Last ${dateTimeLabel(summary?.last_sample_ms)}`),
     metricCard("Closest Distance", numeric(closestValue, 2, " m"), closest ? dateTimeLabel(closest.closest_at_ms) : "-"),
     metricCard("RTK Fixed", percent(summary?.fix_fixed_count, fixTotal), `${summary?.fix_fixed_count || 0} fixed samples`),
@@ -1268,7 +1439,7 @@ function linePath(points, width, height, padding, minValue, maxValue, mode = "li
 
 function compactTimeLabel(ms) {
   const date = new Date(ms);
-  if (state.logRange === "live") {
+  if (state.statisticsRange === "live") {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
   return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" });
@@ -1402,9 +1573,9 @@ function renderLineChart(
   el.addEventListener("mouseleave", hideTooltip);
 }
 
-function renderLogCharts(hourly) {
-  if (state.logRange === "live") {
-    renderLiveSampleCharts(state.logs?.samples);
+function renderStatisticsCharts(hourly) {
+  if (state.statisticsRange === "live") {
+    renderLiveSampleCharts(state.statistics?.samples);
     return;
   }
 
@@ -1439,7 +1610,7 @@ function renderLogCharts(hourly) {
 
 function renderLiveSampleCharts(samplesPayload) {
   const samples = samplesPayload?.samples || [];
-  const statusRows = buildDeviceStatusRows(samples, state.logs?.events?.events || []);
+  const statusRows = buildDeviceStatusRows(samples, state.statistics?.events?.events || []);
   byId("distance-chart-title").textContent = "Live Distance";
   byId("rtk-chart-title").textContent = "Live RTK Fixed";
   byId("ntrip-chart-title").textContent = "Live Device Status";
@@ -1487,7 +1658,7 @@ function renderLiveSampleCharts(samplesPayload) {
 
 function buildDeviceStatusRows(samples, events) {
   const selected = selectedDevice();
-  const deviceId = selected?.device_id || selectedLogDeviceId();
+  const deviceId = selected?.device_id || selectedStatisticsDeviceId();
   const rows = [];
 
   samples
@@ -1526,49 +1697,52 @@ function buildDeviceStatusRows(samples, events) {
   return rows.sort((a, b) => a.at_ms - b.at_ms);
 }
 
-function renderLogEvents(eventsPayload) {
+function renderStatisticsEvents(eventsPayload) {
   const events = eventsPayload?.events || [];
-  const panel = byId("log-events");
+  const panel = byId("statistics-events");
   if (!events.length) {
-    panel.innerHTML = `<div class="log-event-empty">No events for this range</div>`;
+    panel.innerHTML = `<div class="statistics-event-empty">No events for this range</div>`;
     return;
   }
   panel.innerHTML = events
     .map(
       (event) => `
-        <div class="log-event">
-          <div class="log-event-time">${escapeHtml(dateTimeLabel(event.at_ms))}</div>
-          <div class="log-event-message">
+        <div class="statistics-event">
+          <div class="statistics-event-time">${escapeHtml(dateTimeLabel(event.at_ms))}</div>
+          <div class="statistics-event-message">
             <strong>${escapeHtml(event.message || event.event_type)}</strong>
-            <div class="log-event-device">${escapeHtml(event.device_id || "Dashboard")}</div>
+            <div class="statistics-event-device">${escapeHtml(event.device_id || "Dashboard")}</div>
           </div>
-          <div class="log-event-type">${escapeHtml(event.event_type || "event")}</div>
+          <div class="statistics-event-type">${escapeHtml(event.event_type || "event")}</div>
         </div>
       `
     )
     .join("");
 }
 
-function renderLogs() {
-  const logs = state.logs;
+function renderStatistics() {
+  const statistics = state.statistics;
   const selected = selectedDevice();
-  byId("logging-heading").textContent = selected ? `${displayNameForDevice(selected)} Operational History` : "Operational History";
-  if (!logs?.summary?.enabled) {
-    byId("log-metric-grid").innerHTML = metricCard("Logging", "Disabled", "Enable logging in config.yaml");
+  byId("statistics-heading").textContent = selected ? `${displayNameForDevice(selected)} Operational History` : "Operational History";
+  if (!statistics?.summary?.enabled) {
+    byId("statistics-metric-grid").innerHTML = metricCard("Logging", "Disabled", "Enable logging in config.yaml");
     byId("distance-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
     byId("rtk-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
     byId("ntrip-chart").innerHTML = `<div class="chart-empty">Logging is disabled</div>`;
-    byId("log-events").innerHTML = `<div class="log-event-empty">Logging is disabled</div>`;
+    byId("statistics-events").innerHTML = `<div class="statistics-event-empty">Logging is disabled</div>`;
     return;
   }
-  renderLogMetrics(logs.summary);
-  renderLogCharts(logs.hourly);
-  renderLogEvents(logs.events);
+  renderStatisticsMetrics(statistics.summary);
+  renderStatisticsCharts(statistics.hourly);
+  renderStatisticsEvents(statistics.events);
 }
 
 function render(snapshot) {
   state.lastVersion = Math.max(state.lastVersion, snapshotVersion(snapshot));
   state.data = snapshot;
+  if (!snapshot.server?.replay) {
+    state.liveSnapshot = snapshot;
+  }
   state.snapshotServerNowMs = Number(snapshot?.server?.now_ms) || Date.now();
   state.snapshotLocalReceivedMs = Date.now();
   ensureSelectedDevice(snapshot);
@@ -1605,7 +1779,8 @@ async function fetchLatestState(newerOnly = false) {
   try {
     const response = await fetch("/api/state", { cache: "no-store" });
     const snapshot = await response.json();
-    if (!newerOnly || snapshotVersion(snapshot) > state.lastVersion) {
+    state.liveSnapshot = snapshot;
+    if (state.currentView !== "replay" && (!newerOnly || snapshotVersion(snapshot) > state.lastVersion)) {
       render(snapshot);
     }
     return snapshot;
@@ -1630,13 +1805,38 @@ async function boot() {
   document.querySelectorAll(".view-tab").forEach((button) => {
     button.addEventListener("click", () => setActiveView(button.dataset.view || "live"));
   });
-  byId("refresh-logs").addEventListener("click", () => refreshLogs().catch((error) => console.error(error)));
-  updateLogRangeTabs();
-  document.querySelectorAll(".log-range-tab").forEach((button) => {
+  byId("refresh-statistics").addEventListener("click", () => refreshStatistics().catch((error) => console.error(error)));
+  initReplayPanelInteractions();
+  byId("replay-play").addEventListener("click", toggleReplayPlayback);
+  byId("replay-speed").addEventListener("change", () => {
+    state.replay.speed = Number(byId("replay-speed").value) || 1;
+    state.replay.lastTickMs = Date.now();
+    updateReplayControls();
+  });
+  byId("replay-scrubber").addEventListener("input", () => {
+    const sliderSeconds = Number(byId("replay-scrubber").value);
+    stopReplay();
+    const range = state.replay.range;
+    const fromMs = Number(range?.from_ms);
+    if (Number.isFinite(fromMs)) {
+      loadReplayAt(fromMs + sliderSeconds * 1000).catch((error) =>
+        console.error("Replay refresh failed", error)
+      );
+    }
+  });
+  byId("replay-timestamp").addEventListener("change", () => {
+    const atMs = msFromInputDateTime(byId("replay-timestamp").value);
+    if (atMs !== null) {
+      stopReplay();
+      loadReplayAt(atMs).catch((error) => console.error("Replay refresh failed", error));
+    }
+  });
+  updateStatisticsRangeTabs();
+  document.querySelectorAll(".statistics-range-tab").forEach((button) => {
     button.addEventListener("click", () => {
-      state.logRange = button.dataset.range || "24h";
-      updateLogRangeTabs();
-      refreshLogs().catch((error) => console.error(error));
+      state.statisticsRange = button.dataset.range || "24h";
+      updateStatisticsRangeTabs();
+      refreshStatistics().catch((error) => console.error(error));
     });
   });
 
@@ -1649,12 +1849,18 @@ async function boot() {
   };
   events.addEventListener("state", (event) => {
     state.eventStreamConnected = true;
-    render(JSON.parse(event.data));
+    const snapshot = JSON.parse(event.data);
+    state.liveSnapshot = snapshot;
+    if (state.currentView !== "replay") {
+      render(snapshot);
+    }
   });
   events.onerror = () => {
     state.eventStreamConnected = false;
-    byId("live-label").textContent = "Reconnecting";
-    byId("live-dot").className = "status-dot offline";
+    if (state.currentView !== "replay") {
+      byId("live-label").textContent = "Reconnecting";
+      byId("live-dot").className = "status-dot offline";
+    }
   };
   setInterval(refreshAgeSensitiveUi, 500);
   setInterval(() => {
@@ -1664,8 +1870,8 @@ async function boot() {
     });
   }, state.fallbackPollMs);
   setInterval(() => {
-    if (state.currentView === "logging") {
-      refreshLogs().catch((error) => console.error("Log refresh failed", error));
+    if (state.currentView === "statistics") {
+      refreshStatistics().catch((error) => console.error("Statistics refresh failed", error));
     }
   }, 2000);
 }
