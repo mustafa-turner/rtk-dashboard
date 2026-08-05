@@ -157,7 +157,7 @@ Start the dashboard, then update the rover MQTT settings to use this machine as
 the broker on port `1883`. Once telemetry starts publishing to `batch_ds`, the
 dashboard should update automatically.
 
-## Logging History
+## Statistics History
 
 When `logging.enabled` is true, the dashboard writes telemetry history to a
 local SQLite database. The default `data/rtk-dashboard.sqlite` path is relative
@@ -169,14 +169,14 @@ rover publish interval of about 2 seconds, expect roughly `40-120 MB` per day
 per device for raw samples, depending on payload size. The default 30 day
 retention is comfortable on a 1 TB SSD, and hourly summaries are tiny.
 
-The Logging tab reads these local API endpoints:
+The Statistics tab reads these local logging API endpoints:
 
 - `/api/logs/summary?range=24h|7d|30d&device_id=...`
 - `/api/logs/hourly?from=...&to=...&device_id=...`
 - `/api/logs/events?from=...&to=...&device_id=...`
 - `/api/logs/samples?from=...&to=...&device_id=...&limit=500`
 
-While the Logging tab is open, it refreshes automatically. Use the top rover
+While the Statistics tab is open, it refreshes automatically. Use the top rover
 buttons to choose which crane to plot, then switch between `30 days`, `7 days`,
 `24 hours`, and `Live`. The live chart plots recent raw samples at the device
 publish cadence. Moving across a chart shows the nearest timestamp and value.
