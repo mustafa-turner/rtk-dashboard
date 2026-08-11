@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Crane Rover Dashboard</title>
+    <title>IoT Device Dashboard</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
     <link rel="stylesheet" href="/style.css">
   </head>
@@ -11,14 +11,14 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-block">
-          <h1 id="dashboard-title">Crane Rover Dashboard</h1>
+          <h1 id="dashboard-title">IoT Device Dashboard</h1>
           <div class="subline">
             <span id="mqtt-address">MQTT</span>
-            <span id="device-count">0 rovers</span>
+            <span id="device-count">0 devices</span>
             <span id="peer-count">0 peers</span>
           </div>
         </div>
-        <div class="header-rover-list" id="header-rover-list"></div>
+        <div class="header-rover-list" id="header-rover-list" aria-label="Devices"></div>
         <nav class="view-tabs" aria-label="Dashboard views">
           <button type="button" class="view-tab active" data-view="live">Live</button>
           <button type="button" class="view-tab" data-view="replay">Replay</button>
@@ -34,8 +34,8 @@
         <section class="map-panel">
           <div id="map"></div>
           <div class="map-overlay">
-            <div class="selected-label" id="selected-label">No rover selected</div>
-            <button type="button" id="center-map" title="Center on rover">C</button>
+            <div class="selected-label" id="selected-label">No device selected</div>
+            <button type="button" id="center-map" title="Center on device">C</button>
           </div>
           <div class="replay-panel" id="replay-panel" hidden>
             <div class="replay-time-row">
@@ -97,7 +97,7 @@
           </section>
 
           <section class="summary-panel">
-            <div class="panel-title">Rover Telemetry</div>
+            <div class="panel-title" id="telemetry-panel-title">Device Telemetry</div>
             <div class="telemetry-compare" id="telemetry-compare"></div>
           </section>
 
@@ -156,6 +156,6 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

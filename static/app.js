@@ -1,3 +1,10 @@
+import {
+  countLabel,
+  deviceTypeLabel,
+  metricDefinitions,
+  supportsPeerSafety,
+} from "/device-ui.js";
+
 const state = {
   data: null,
   selectedId: null,
@@ -427,6 +434,15 @@ function roverAntennaOffsetForSize(size) {
 }
 
 function roverIconForMarker({ variant, status }) {
+  if (variant === "generic-device") {
+    return L.divIcon({
+      className: `generic-device-marker ${status}`,
+      html: `<span aria-hidden="true"></span>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+      popupAnchor: [0, -12],
+    });
+  }
   const size = roverIconSizeForZoom();
   if (!size) return null;
   const antennaOffset = roverAntennaOffsetForSize(size);
@@ -653,10 +669,26 @@ function firstDeviceLatLng() {
 
 function updateHeader(snapshot) {
   const dashboard = snapshot.server.dashboard || {};
+  const mqtt = snapshot.server.mqtt || {};
   const nowMs = snapshotNowMs(snapshot);
-  byId("dashboard-title").textContent = dashboard.title || "Crane Rover Dashboard";
-  byId("mqtt-address").textContent = `MQTT ${snapshot.server.mqtt.host}:${snapshot.server.mqtt.port}`;
-  byId("device-count").textContent = `${Object.keys(snapshot.devices).length} rovers`;
+  byId("dashboard-title").textContent = dashboard.title || "IoT Device Dashboard";
+  let mqttHost = String(mqtt.advertisedHost || mqtt.host || window.location.hostname);
+  const browserHost = window.location.hostname;
+  if (mqtt.advertisedHostSource === "auto" &&
+      !["127.0.0.1", "localhost", "::1", "[::1]"].includes(browserHost)) {
+    mqttHost = browserHost;
+  }
+  if (["0.0.0.0", "::", "[::]"].includes(mqttHost)) mqttHost = window.location.hostname;
+  if (["127.0.0.1", "localhost", "::1", "[::1]"].includes(mqttHost) &&
+      !["127.0.0.1", "localhost", "::1", "[::1]"].includes(window.location.hostname)) {
+    mqttHost = window.location.hostname;
+  }
+  const displayHost = mqttHost.includes(":") && !mqttHost.startsWith("[") ? `[${mqttHost}]` : mqttHost;
+  byId("mqtt-address").textContent = `MQTT mqtt://${displayHost}:${mqtt.port || 1883}`;
+  byId("mqtt-address").title = mqtt.authRequired
+    ? "MQTT authentication required; credentials are not displayed"
+    : "MQTT broker address";
+  byId("device-count").textContent = countLabel(Object.keys(snapshot.devices).length);
   byId("peer-count").textContent = `${Object.keys(snapshot.peers).length} peers`;
 
   const selected = selectedDevice();
@@ -694,6 +726,8 @@ function roverSummaryFromDevice(device, role, snapshot) {
     lastSeenMs: telemetrySeenMs,
     lastPositionSeenMs: device?.last_position_seen_ms || 0,
     telemetry,
+    profile: device?.profile || null,
+    deviceType: device?.device_type || "device",
     fix: telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN",
     accuracy: numeric(telemetry.local_accuracy_m, 3, " m"),
     source: device?.source_host || "",
@@ -847,6 +881,16 @@ function batteryForRover(rover) {
 
 function telemetryRowsForRover(rover) {
   const telemetry = rover?.telemetry || {};
+  const profileMetrics = rover?.kind === "device" ? metricDefinitions({ profile: rover.profile }) : [];
+  if (profileMetrics.length && !rover?.profile?.supports_peer_safety) {
+    return profileMetrics.map((metric) => {
+      const value = telemetry[metric.key];
+      const formatted = typeof value === "number"
+        ? numeric(value, Number(metric.digits ?? 1), metric.unit || "")
+        : valueOrDash(value, metric.unit || "");
+      return [metric.label || metric.key, formatted];
+    });
+  }
   return [
     ["Fix", rover?.fix || "-"],
     ["NTRIP", ntripForRover(rover)],
@@ -862,7 +906,7 @@ function telemetryRowsForRover(rover) {
 function renderTelemetryCompare(rovers) {
   const panel = byId("telemetry-compare");
   if (!rovers.length) {
-    panel.innerHTML = `<div class="empty">Waiting for rover telemetry</div>`;
+    panel.innerHTML = `<div class="empty">Waiting for device telemetry</div>`;
     return;
   }
 
@@ -980,7 +1024,7 @@ function renderHeaderRovers(snapshot) {
   const list = byId("header-rover-list");
   const devices = sortedDevices(snapshot);
   if (!devices.length) {
-    list.innerHTML = `<div class="header-empty">Waiting for rovers</div>`;
+    list.innerHTML = `<div class="header-empty">Waiting for devices</div>`;
     return;
   }
 
@@ -998,7 +1042,9 @@ function renderHeaderRovers(snapshot) {
     const deviceId = String(device.device_id);
     const telemetry = device.telemetry || {};
     const displayName = displayNameForDevice(device);
-    const statusClass = deviceIsDisconnected(device, snapshot) ? "" : statusClassForFix(telemetry.fix_mode);
+    const statusClass = deviceIsDisconnected(device, snapshot)
+      ? ""
+      : supportsPeerSafety(device) ? statusClassForFix(telemetry.fix_mode) : "good";
 
     const row = ensureHeaderRoverButton(list, deviceId);
     const isActive = deviceId === state.selectedId;
@@ -1023,11 +1069,13 @@ function updateMarkers(snapshot) {
     const latLng = getLatLng(telemetry);
     if (!latLng) return;
     seenDevices.add(device.device_id);
-    const title = `${displayNameForDevice(device)} - ${telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN"}`;
+    const title = `${displayNameForDevice(device)} - ${supportsPeerSafety(device)
+      ? telemetry.fix_mode_label || fixLabels[telemetry.fix_mode] || "UNKNOWN"
+      : deviceTypeLabel(device)}`;
     const disconnected = deviceIsDisconnected(device, snapshot);
     const fillColor = disconnected ? "#657080" : "#0f7490";
     const marker = updateRoverMarker(state.deviceMarkers.get(device.device_id), latLng, {
-      variant: "device",
+      variant: supportsPeerSafety(device) ? "device" : "generic-device",
       status: disconnected ? "offline" : "live",
       zIndexOffset: 200,
       dotStyle: {
@@ -1081,7 +1129,7 @@ function updateSelectedLabel(device) {
   const telemetry = device?.telemetry || {};
   const latLng = getLatLng(telemetry);
   if (!device) {
-    byId("selected-label").textContent = "No rover selected";
+    byId("selected-label").textContent = "No device selected";
   } else if (latLng) {
     byId("selected-label").textContent = `${displayNameForDevice(device)} - ${latLng[0].toFixed(7)}, ${latLng[1].toFixed(7)}`;
   } else {
@@ -1092,7 +1140,7 @@ function updateSelectedLabel(device) {
 function renderRawPayloads(rovers) {
   const raw = byId("raw-fields");
   if (!rovers.length) {
-    raw.innerHTML = `<div class="empty">No crane payloads yet</div>`;
+    raw.innerHTML = `<div class="empty">No device payloads yet</div>`;
     return;
   }
 
@@ -1627,6 +1675,11 @@ function renderLineChart(
 }
 
 function renderStatisticsCharts(hourly) {
+  const selected = selectedDevice();
+  if (selected && !supportsPeerSafety(selected)) {
+    renderProfileStatisticsCharts(selected, hourly);
+    return;
+  }
   if (state.statisticsRange === "live") {
     renderLiveSampleCharts(state.statistics?.samples);
     return;
@@ -1659,6 +1712,47 @@ function renderStatisticsCharts(hourly) {
     (row) => Number(row.connection_percent),
     { suffix: "%", color: "#0f7490", digits: 0, minScale: 0, maxScale: 100 }
   );
+}
+
+function renderProfileStatisticsCharts(device, hourly) {
+  const definitions = metricDefinitions(device).slice(0, 3);
+  const slots = [
+    ["distance-chart-title", "distance-chart", "#c2410c"],
+    ["rtk-chart-title", "rtk-chart", "#0f8b5f"],
+    ["ntrip-chart-title", "ntrip-chart", "#0f7490"],
+  ];
+  const isLive = state.statisticsRange === "live";
+  const liveRows = (state.statistics?.samples?.samples || []).map((row) => {
+    try {
+      return { ...row, ...JSON.parse(row.payload_json || "{}") };
+    } catch (_error) {
+      return row;
+    }
+  });
+  const hourlyRows = hourly?.numeric_metrics || [];
+
+  slots.forEach(([titleId, chartId, color], index) => {
+    const definition = definitions[index];
+    if (!definition) {
+      byId(titleId).textContent = "Additional Profile Metric";
+      byId(chartId).innerHTML = `<div class="chart-empty">No additional metric configured</div>`;
+      return;
+    }
+    byId(titleId).textContent = `${definition.label} ${isLive ? "Live" : "By Hour"}`;
+    const rows = isLive
+      ? liveRows
+      : hourlyRows.filter((row) => row.metric_key === definition.key);
+    renderLineChart(
+      byId(chartId),
+      rows,
+      (row) => Number(isLive ? row[definition.key] : row.avg_value),
+      {
+        suffix: definition.unit || "",
+        color,
+        digits: Number(definition.digits ?? 1),
+      }
+    );
+  });
 }
 
 function renderLiveSampleCharts(samplesPayload) {
@@ -1804,10 +1898,16 @@ function render(snapshot) {
     restartStatisticsStream();
   }
   const selected = selectedDevice();
-  const safetyRovers = buildSafetyRovers(selected, snapshot);
-  const payloadRovers = buildPayloadRovers(selected, snapshot);
+  const hasPeerSafety = supportsPeerSafety(selected);
+  const safetyRovers = hasPeerSafety
+    ? buildSafetyRovers(selected, snapshot)
+    : selected ? [roverSummaryFromDevice(selected, deviceTypeLabel(selected), snapshot)] : [];
+  const payloadRovers = hasPeerSafety
+    ? buildPayloadRovers(selected, snapshot)
+    : selected ? [roverSummaryFromDevice(selected, "", snapshot)] : [];
   updateHeader(snapshot);
-  updateSafety(selected, snapshot, safetyRovers);
+  byId("safety-panel").hidden = !hasPeerSafety;
+  updateSafety(hasPeerSafety ? selected : null, snapshot, hasPeerSafety ? safetyRovers : []);
   renderTelemetryCompare(safetyRovers);
   renderHeaderRovers(snapshot);
   updateMarkers(snapshot);
@@ -1820,11 +1920,15 @@ function refreshAgeSensitiveUi() {
   if (!snapshot) return;
 
   const selected = selectedDevice();
-  const safetyRovers = buildSafetyRovers(selected, snapshot);
+  const hasPeerSafety = supportsPeerSafety(selected);
+  const safetyRovers = hasPeerSafety
+    ? buildSafetyRovers(selected, snapshot)
+    : selected ? [roverSummaryFromDevice(selected, deviceTypeLabel(selected), snapshot)] : [];
   if (state.eventStreamConnected) {
     updateHeader(snapshot);
   }
-  updateSafety(selected, snapshot, safetyRovers);
+  byId("safety-panel").hidden = !hasPeerSafety;
+  updateSafety(hasPeerSafety ? selected : null, snapshot, hasPeerSafety ? safetyRovers : []);
   renderTelemetryCompare(safetyRovers);
   renderHeaderRovers(snapshot);
   updateMarkers(snapshot);

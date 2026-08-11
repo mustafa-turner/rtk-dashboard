@@ -1,11 +1,11 @@
 # RTK Dashboard
 
-Local MQTT replacement for Blynk plus a web dashboard for `crane-rover`
-telemetry.
+Local MQTT ingestion, history, and web visualization for multiple IoT device
+types. It includes a compatibility profile for `crane-rover`, plus built-in
+profiles for tide sensors, weather stations, and trucks.
 
-The rover can keep publishing the same `batch_ds` JSON payload. Point it at
-this machine instead of Blynk and the dashboard will accept the existing data
-shape.
+Existing rovers can keep publishing the same `batch_ds` JSON payload. New
+devices can publish ordinary JSON without changing the MQTT or storage layers.
 
 ## What This Runs
 
@@ -67,6 +67,12 @@ publisher:
 python3 tools/publish_sample.py
 ```
 
+Publish all built-in device examples with:
+
+```bash
+python3 tools/publish_sample.py --type all
+```
+
 ## First Install Checklist
 
 For a new install, confirm these basics first:
@@ -108,21 +114,29 @@ logging:
   rollupIntervalSec: 300
 
 dashboard:
-  title: Crane Rover Dashboard
+  title: IoT Device Dashboard
   roverAntennaOffset:
     x: 0
     y: 0
-  roverNames:
+  deviceNames:
     # 192.168.1.21: rover-alpha
   defaultCenter:
     latitude: -2.5489
     longitude: 118.0149
     zoom: 5
+
+devices:
+  disconnectedAfterSec: 5
+  types: {}
 ```
 
 ### Common Settings
 
 - `mqtt.host` / `mqtt.port`: where the local MQTT listener binds
+- `mqtt.advertisedHost`: address shown in the dashboard for devices to use;
+  `auto` selects the IP on the machine's default network route
+- `mqtt.username` / `mqtt.passwordEnv`: optional MQTT authentication; the
+  password is read from an environment variable and is never returned by the API
 - `http.host` / `http.port`: where the dashboard web server binds
 - `udpPeers.enabled`: enable or disable peer discovery traffic
 - `logging.enabled`: enable or disable the SQLite history database
@@ -130,8 +144,71 @@ dashboard:
   retained indefinitely when `summaryRetentionDays` is `0`
 - `dashboard.title`: title shown in the browser
 - `dashboard.defaultCenter`: default map center and zoom
-- `dashboard.roverNames`: manual display names for device IDs, client IDs,
+- `dashboard.deviceNames`: manual display names for device IDs, client IDs,
   usernames, or source IPs
+- `devices.types`: optional profile definitions for new device types
+
+### MQTT Address And Credentials
+
+The top-left header shows a connection address such as
+`MQTT mqtt://192.168.1.50:1883`. Binding to `0.0.0.0` lets the server listen on
+all interfaces, but devices must connect to the advertised LAN address—not to
+`0.0.0.0`. If `auto` chooses the wrong interface on a machine with Ethernet,
+Wi-Fi, or a VPN, set the address explicitly:
+
+```yaml
+mqtt:
+  host: 0.0.0.0
+  port: 1883
+  advertisedHost: 192.168.1.50
+  username: device
+  passwordEnv: RTK_DASHBOARD_MQTT_PASSWORD
+```
+
+The IP address, port, topic, username, and device ID are configuration—not
+secrets. The MQTT password and Wi-Fi password are secrets. Keep them out of
+Git, screenshots, logs, and telemetry payloads.
+
+For an interactive launch:
+
+```bash
+export RTK_DASHBOARD_MQTT_PASSWORD='replace-with-a-long-random-password'
+python3 server.py --config config.yaml
+```
+
+For systemd, create `/etc/rtk-dashboard.env`:
+
+```text
+RTK_DASHBOARD_MQTT_PASSWORD=replace-with-a-long-random-password
+```
+
+Then protect and restart it:
+
+```bash
+sudo chown root:root /etc/rtk-dashboard.env
+sudo chmod 600 /etc/rtk-dashboard.env
+sudo systemctl daemon-reload
+sudo systemctl restart rtk-dashboard
+```
+
+This built-in broker uses plain MQTT on port 1883. Restrict it to a trusted LAN
+or VPN and do not expose it directly to the public internet. Authentication
+prevents accidental clients from publishing but does not encrypt traffic.
+
+### Tide Logger Payload
+
+The built-in `tide_sensor` profile matches the ESP32 tide logger and accepts its
+water level, ultrasonic distance, power measurements, SHT40 readings, quality
+diagnostics, and offline-queue counters. Publish JSON to:
+
+```text
+telemetry/tide_sensor/tide-station-01
+```
+
+Use `measured_at_ms` for the original UTC measurement time. Delayed LittleFS
+records are stored and charted at that time rather than their later upload time.
+See `docs/tide-logger-codex-prompt.md` for the complete firmware integration
+contract.
 
 ## Verify A New Install
 
@@ -185,15 +262,77 @@ other consumers:
 - `/api/logs/samples?from=...&to=...&device_id=...&limit=500`
 
 While the Statistics tab is open, the server pushes shared snapshots at an
-interval appropriate for the selected range. Use the top rover buttons to choose
-which crane to plot, then switch between `30 days`, `7 days`, `24 hours`, and
+interval appropriate for the selected range. Use the top device buttons to choose
+which device to plot, then switch between `30 days`, `7 days`, `24 hours`, and
 `Live`. The live chart plots recent raw samples at the device publish cadence.
 Moving across a chart shows the nearest timestamp and value.
 
-The raw sample table stores the full JSON payload, so future devices such as
-tide sensors or truck trackers can be logged before the dashboard gets
-device-specific charts. The logger also records telemetry disconnect and
+The raw sample table stores the full JSON payload, so unprofiled devices are
+logged without schema migrations. The logger also records telemetry disconnect and
 reconnect events so spotty network periods can be reviewed later.
+
+## Adding Another Device Type
+
+All JSON objects are accepted. Unknown explicit types use the generic device
+card and keep every payload field. A device can identify itself in the payload:
+
+```json
+{
+  "device_id": "soil-17",
+  "device_type": "soil_probe",
+  "moisture_percent": 43.2,
+  "battery_percent": 88
+}
+```
+
+Recommended MQTT topics are:
+
+- `telemetry/<device-id>` when the payload contains `device_type`
+- `telemetry/<device-type>/<device-id>` when the type belongs in the topic
+- `devices/<device-id>/telemetry` for a conventional device-first hierarchy
+
+The existing `batch_ds`, `batch_ds/<device-id>`, `ds/<field>`, and `info/mcu`
+routes remain supported.
+
+To give a new type aliases and a curated telemetry card, declare it under
+`devices.types`. No Python or JavaScript changes are required:
+
+```yaml
+devices:
+  types:
+    soil_probe:
+      label: Soil Probe
+      category: environment
+      supportsMap: true
+      matchFields: [moisture_percent, soil_temperature_c]
+      aliases:
+        battery_percent: [battery_pct]
+      metrics:
+        moisture_percent:
+          label: Moisture
+          unit: "%"
+          digits: 1
+        soil_temperature_c:
+          label: Soil Temperature
+          unit: " °C"
+          digits: 1
+```
+
+Built-in profiles live in `rtk_dashboard/device_profiles.py`. Add code there
+only when a type needs behavior beyond configuration, such as crane peer-safety
+semantics.
+
+## Code Layout
+
+- `server.py`: small compatibility entry point
+- `rtk_dashboard/device_profiles.py`: type inference, aliases, and UI metadata
+- `rtk_dashboard/state.py`: live device state and ingestion orchestration
+- `rtk_dashboard/storage.py`: SQLite samples, rollups, queries, and replay
+- `rtk_dashboard/statistics.py`: shared statistics subscriptions
+- `rtk_dashboard/mqtt.py` and `peer_udp.py`: transport adapters
+- `rtk_dashboard/http_server.py` and `tiles.py`: HTTP/SSE and maps
+- `static/device-ui.js`: browser-side device profile rendering
+- `static/app.js`: dashboard interaction, maps, replay, and charts
 
 ## Rover Config
 
@@ -355,7 +494,7 @@ Restart after changes:
 sudo systemctl restart rtk-dashboard.service
 ```
 
-## Accepted Telemetry Fields
+## Crane Rover Telemetry Fields
 
 The dashboard displays these existing Blynk-style telemetry fields:
 
@@ -385,6 +524,7 @@ The dashboard displays these existing Blynk-style telemetry fields:
 - optional uptime fields such as `uptime_sec`, `app_uptime_sec`, or
   `device_uptime_sec`
 
-It also accepts optional `device_id` or `deviceId` in the payload, plus
-`batch_ds/<device_id>` topic variants if you later move each rover to its own
-topic.
+Every device type may include optional `device_id` / `deviceId`, `device_type`
+/ `deviceType`, latitude/longitude (including `lat`, `lon`, or `lng` aliases),
+battery values, and arbitrary type-specific fields. Crane rovers additionally
+accept the fields above.

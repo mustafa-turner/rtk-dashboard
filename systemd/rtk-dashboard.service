@@ -8,6 +8,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/rtk-dashboard
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/rtk-dashboard.env
 ExecStart=/usr/bin/python3 /home/pi/rtk-dashboard/server.py --config /home/pi/rtk-dashboard/config.yaml
 Restart=always
 RestartSec=5

@@ -1,6 +1,13 @@
 mqtt:
   host: 0.0.0.0
   port: 1883
+  # "auto" advertises the IP of the default network route in the dashboard.
+  # Set this to a fixed LAN/ZeroTier IP if the machine has multiple interfaces.
+  advertisedHost: auto
+  # Authentication is optional for backward compatibility. For a protected
+  # broker, uncomment both lines and export the password before starting.
+  # username: device
+  # passwordEnv: RTK_DASHBOARD_MQTT_PASSWORD
 
 http:
   host: 0.0.0.0
@@ -22,16 +29,44 @@ logging:
   rollupIntervalSec: 300
 
 dashboard:
-  title: Crane Rover Dashboard
+  title: IoT Device Dashboard
   roverAntennaOffset:
     # Offset from the icon center to the GNSS antenna, in source-image pixels.
     # Positive x moves right on the icon, positive y moves down on the icon.
     x: 0
     y: 0
-  roverNames:
+  deviceNames:
     # Match against device_id, MQTT client ID, username, or source IP.
     # 192.168.1.21: rover-alpha
+    # tide-station-01: Pier Tide Logger
   defaultCenter:
     latitude: -2.5489
     longitude: 118.0149
     zoom: 5
+
+# Built-in types: crane_rover, tide_sensor, weather_station, truck, and device.
+# Any JSON payload is still accepted. Define a profile when you want friendly
+# labels, aliases, and a curated telemetry card for a new type.
+devices:
+  disconnectedAfterSec: 5
+  types:
+    air_quality_sensor:
+      label: Air Quality Sensor
+      category: environment
+      supportsMap: true
+      matchFields: [pm25_ugm3, co2_ppm]
+      aliases:
+        battery_percent: [battery_pct]
+      metrics:
+        pm25_ugm3:
+          label: PM2.5
+          unit: " µg/m³"
+          digits: 1
+        co2_ppm:
+          label: CO₂
+          unit: " ppm"
+          digits: 0
+        battery_percent:
+          label: Battery
+          unit: "%"
+          digits: 0
