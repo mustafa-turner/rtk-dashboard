@@ -4,10 +4,6 @@ mqtt:
   # "auto" advertises the IP of the default network route in the dashboard.
   # Set this to a fixed LAN/ZeroTier IP if the machine has multiple interfaces.
   advertisedHost: auto
-  # Authentication is optional for backward compatibility. For a protected
-  # broker, uncomment both lines and export the password before starting.
-  # username: device
-  # passwordEnv: RTK_DASHBOARD_MQTT_PASSWORD
 
 http:
   host: 0.0.0.0

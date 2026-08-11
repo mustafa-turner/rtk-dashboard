@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ipaddress
-import os
 import socket
 import struct
 from typing import Any
@@ -71,21 +70,12 @@ def advertised_mqtt_host(mqtt_config: dict[str, Any]) -> str:
     return bind_host if bind_host not in WILDCARD_HOSTS else discover_lan_ip()
 
 
-def mqtt_password(mqtt_config: dict[str, Any]) -> str:
-    environment_name = str(mqtt_config.get("passwordEnv") or "").strip()
-    if environment_name:
-        return os.environ.get(environment_name, "")
-    # Supported for compatibility, but environment-based secrets are preferred.
-    return str(mqtt_config.get("password") or "")
-
-
 def public_mqtt_config(mqtt_config: dict[str, Any]) -> dict[str, Any]:
-    """Return connection metadata without ever exposing credentials."""
+    """Return connection metadata used by the browser header."""
     advertised_setting = str(mqtt_config.get("advertisedHost") or "auto").strip()
     return {
         "host": mqtt_config.get("host", "0.0.0.0"),
         "port": int(mqtt_config.get("port", 1883)),
         "advertisedHost": advertised_mqtt_host(mqtt_config),
         "advertisedHostSource": "auto" if advertised_setting.lower() == "auto" else "explicit",
-        "authRequired": bool(mqtt_config.get("username") or mqtt_config.get("passwordEnv") or mqtt_config.get("password")),
     }

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import hmac
 import socket
 import socketserver
 import struct
@@ -10,7 +9,6 @@ import threading
 from dataclasses import dataclass
 
 from .state import DashboardState
-from .network import mqtt_password
 
 class MqttClientContext:
     client_id: str = ""
@@ -23,12 +21,6 @@ class MinimalMqttBroker:
         self.state = state
         self.host = host
         self.port = int(port)
-        mqtt_config = state.config.get("mqtt", {})
-        self.expected_username = str(mqtt_config.get("username") or "")
-        self.expected_password = mqtt_password(mqtt_config)
-        password_environment = str(mqtt_config.get("passwordEnv") or "").strip()
-        if password_environment and not self.expected_password:
-            raise ValueError(f"MQTT password environment variable {password_environment!r} is not set")
         self._server: ThreadedTcpServer | None = None
         self._counter = 0
         self._counter_lock = threading.Lock()
@@ -37,13 +29,6 @@ class MinimalMqttBroker:
         with self._counter_lock:
             self._counter += 1
             return f"dashboard-auto-{self._counter}"
-
-    def credentials_are_valid(self, username: str, password: str) -> bool:
-        if self.expected_username and not hmac.compare_digest(username, self.expected_username):
-            return False
-        if self.expected_password and not hmac.compare_digest(password, self.expected_password):
-            return False
-        return True
 
     def start(self) -> None:
         broker = self
@@ -132,7 +117,6 @@ def handle_connect(payload: bytes, broker: MinimalMqttBroker, ctx: MqttClientCon
     has_password = bool(connect_flags & 0x40)
     has_will = bool(connect_flags & 0x04)
     username = ""
-    password = ""
 
     if has_will:
         _, offset = mqtt_string(payload, offset)
@@ -140,11 +124,7 @@ def handle_connect(payload: bytes, broker: MinimalMqttBroker, ctx: MqttClientCon
     if has_username:
         username, offset = mqtt_string(payload, offset)
     if has_password:
-        password, offset = mqtt_string(payload, offset)
-
-    if not broker.credentials_are_valid(username, password):
-        sock.sendall(b"\x20\x02\x00\x04")
-        raise PermissionError("invalid MQTT username or password")
+        _, offset = mqtt_string(payload, offset)
 
     ctx.client_id = client_id or broker.next_client_id()
     ctx.username = username

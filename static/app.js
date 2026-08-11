@@ -685,9 +685,7 @@ function updateHeader(snapshot) {
   }
   const displayHost = mqttHost.includes(":") && !mqttHost.startsWith("[") ? `[${mqttHost}]` : mqttHost;
   byId("mqtt-address").textContent = `MQTT mqtt://${displayHost}:${mqtt.port || 1883}`;
-  byId("mqtt-address").title = mqtt.authRequired
-    ? "MQTT authentication required; credentials are not displayed"
-    : "MQTT broker address";
+  byId("mqtt-address").title = "MQTT broker address";
   byId("device-count").textContent = countLabel(Object.keys(snapshot.devices).length);
   byId("peer-count").textContent = `${Object.keys(snapshot.peers).length} peers`;
 

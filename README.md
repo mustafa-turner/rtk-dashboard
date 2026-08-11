@@ -135,8 +135,6 @@ devices:
 - `mqtt.host` / `mqtt.port`: where the local MQTT listener binds
 - `mqtt.advertisedHost`: address shown in the dashboard for devices to use;
   `auto` selects the IP on the machine's default network route
-- `mqtt.username` / `mqtt.passwordEnv`: optional MQTT authentication; the
-  password is read from an environment variable and is never returned by the API
 - `http.host` / `http.port`: where the dashboard web server binds
 - `udpPeers.enabled`: enable or disable peer discovery traffic
 - `logging.enabled`: enable or disable the SQLite history database
@@ -148,7 +146,7 @@ devices:
   usernames, or source IPs
 - `devices.types`: optional profile definitions for new device types
 
-### MQTT Address And Credentials
+### MQTT Address And Network Safety
 
 The top-left header shows a connection address such as
 `MQTT mqtt://192.168.1.50:1883`. Binding to `0.0.0.0` lets the server listen on
@@ -161,39 +159,17 @@ mqtt:
   host: 0.0.0.0
   port: 1883
   advertisedHost: 192.168.1.50
-  username: device
-  passwordEnv: RTK_DASHBOARD_MQTT_PASSWORD
 ```
 
-The IP address, port, topic, username, and device ID are configuration—not
-secrets. The MQTT password and Wi-Fi password are secrets. Keep them out of
-Git, screenshots, logs, and telemetry payloads.
+The IP address, port, topic, and device ID are configuration—not secrets. The
+built-in broker does not require or validate an MQTT username or password.
+Devices should connect without MQTT credentials. Wi-Fi passwords and Blynk
+tokens are still secrets and must stay out of Git, screenshots, logs, and
+telemetry payloads.
 
-For an interactive launch:
-
-```bash
-export RTK_DASHBOARD_MQTT_PASSWORD='replace-with-a-long-random-password'
-python3 server.py --config config.yaml
-```
-
-For systemd, create `/etc/rtk-dashboard.env`:
-
-```text
-RTK_DASHBOARD_MQTT_PASSWORD=replace-with-a-long-random-password
-```
-
-Then protect and restart it:
-
-```bash
-sudo chown root:root /etc/rtk-dashboard.env
-sudo chmod 600 /etc/rtk-dashboard.env
-sudo systemctl daemon-reload
-sudo systemctl restart rtk-dashboard
-```
-
-This built-in broker uses plain MQTT on port 1883. Restrict it to a trusted LAN
-or VPN and do not expose it directly to the public internet. Authentication
-prevents accidental clients from publishing but does not encrypt traffic.
+This built-in broker uses unencrypted, unauthenticated MQTT on port 1883.
+Restrict it to a trusted LAN or VPN with firewall rules and do not expose it
+directly to the public internet.
 
 ### Tide Logger Payload
 
