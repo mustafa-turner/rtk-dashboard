@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 from .state import DashboardState
 
+
+@dataclass
 class MqttClientContext:
     client_id: str = ""
     username: str = ""
